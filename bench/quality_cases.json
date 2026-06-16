@@ -1,0 +1,96 @@
+[
+  {
+    "name": "math_simple",
+    "messages": [{"role": "user", "content": "What is 17 * 23? Reply with just the number."}],
+    "max_tokens": 32,
+    "assertion": "contains",
+    "expected": "391"
+  },
+  {
+    "name": "math_multistep",
+    "messages": [{"role": "user", "content": "A train travels at 60 mph for 2.5 hours, then 40 mph for 1.5 hours. What is the total distance in miles? Reply with just the number."}],
+    "max_tokens": 64,
+    "assertion": "contains",
+    "expected": "210"
+  },
+  {
+    "name": "code_fizzbuzz",
+    "messages": [{"role": "user", "content": "Write a Python function called fizzbuzz(n) that prints numbers 1 to n with the usual fizzbuzz rules. Code only, no prose."}],
+    "max_tokens": 384,
+    "assertion": "all_contains",
+    "expected": ["def fizzbuzz", "% 3", "% 5", "Fizz", "Buzz"]
+  },
+  {
+    "name": "code_mergesort",
+    "messages": [{"role": "user", "content": "Implement merge sort in Python. The function name is merge_sort. Use recursion. Code only, no prose."}],
+    "max_tokens": 512,
+    "assertion": "regex",
+    "expected": "def\\s+merge_sort"
+  },
+  {
+    "name": "multi_lang_en",
+    "messages": [{"role": "user", "content": "What is the capital of France? Reply with just the one-word city name."}],
+    "max_tokens": 16,
+    "assertion": "contains",
+    "expected": "Paris"
+  },
+  {
+    "name": "multi_lang_zh",
+    "messages": [{"role": "user", "content": "用一个词回答：法国的首都是哪个城市？"}],
+    "max_tokens": 16,
+    "assertion": "contains",
+    "expected": "巴黎"
+  },
+  {
+    "name": "multi_lang_ja",
+    "messages": [{"role": "user", "content": "一語で答えて：フランスの首都はどこですか？"}],
+    "max_tokens": 16,
+    "assertion": "contains",
+    "expected": "パリ"
+  },
+  {
+    "name": "tool_calling",
+    "messages": [{"role": "user", "content": "What is the weather in Tokyo right now? Use the available tool."}],
+    "max_tokens": 256,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get the current weather for a city",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {"type": "string", "description": "The city name"}
+            },
+            "required": ["city"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto",
+    "assertion": "tool_call",
+    "expected": {"name": "get_weather", "args_contain": "Tokyo"}
+  },
+  {
+    "name": "multi_turn",
+    "messages": [
+      {"role": "user", "content": "Please remember this number for me: 42. Just acknowledge."},
+      {"role": "assistant", "content": "Got it, I'll remember 42."},
+      {"role": "user", "content": "What number did I ask you to remember?"}
+    ],
+    "max_tokens": 32,
+    "assertion": "contains",
+    "expected": "42"
+  },
+  {
+    "name": "needle_haystack_60k",
+    "messages": [{"role": "user", "content": "__NEEDLE_HAYSTACK__"}],
+    "max_tokens": 32,
+    "assertion": "contains",
+    "expected": "BANANA17",
+    "haystack_target_tokens": 60000,
+    "needle": "The secret password is BANANA17.",
+    "question": "Based on the document above, what is the secret password? Reply with just the password."
+  }
+]

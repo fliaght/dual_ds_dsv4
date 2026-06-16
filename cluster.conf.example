@@ -1,0 +1,74 @@
+# dual_ds_dsv4 cluster config.
+# Copy to `cluster.conf` and edit before running any script.
+#
+#   cp cluster.conf.example cluster.conf && $EDITOR cluster.conf
+#
+# Every script sources this through scripts/_lib.sh.  cluster.conf is .gitignored
+# (it holds your site's IPs/paths) — cluster.conf.example is the committed template.
+
+# ─── Cluster topology ──────────────────────────────────────────────────────────
+# Space-separated node IPs on the *200.x RoCE subnet*.  The FIRST entry is the
+# HEAD (rank 0, serves the API); every later entry is a worker.  This project is
+# validated for exactly 2 DGX Sparks (TP=2); the scripts generalise to N but
+# >2 is untested on V4-Flash.
+NODES="192.168.200.43 192.168.200.45"
+
+# Comma-separated RoCE interface names present on *every* node.  Verify with
+# `ibdev2netdev | awk '/Up/{print $5}' | tr -d '()'` — names MUST match across
+# nodes.  Note the UPPERCASE 'P' in the second port: `enP2p1s0f0np0`.
+IFACES="enp1s0f0np0,enP2p1s0f0np0"
+
+# Shared SSH key used for cross-node commands (00-precheck verifies it is
+# readable).  ssh itself uses your default agent/key; this is just for the
+# precheck and for documenting the expected provisioning.
+SSH_KEY="$HOME/.ssh/id_ed25519_shared"
+
+# ─── Container image ───────────────────────────────────────────────────────────
+# Community vLLM fork built for ARM64 / sm_121 (GB10) with the DeepSeek-V4-Flash
+# loader, MTP support, MLA-sparse Triton kernels, and the Marlin→DeepGEMM
+# layer-42 numerical fix.  Upstream vLLM does NOT serve V4-Flash on sm_121.
+DOCKER_IMAGE="lmxxf/vllm-deepseek-v4-dgx-spark:marlin-fix-20260511"
+CONTAINER_NAME="vllm-dsv4-mn"
+
+# ─── Model ─────────────────────────────────────────────────────────────────────
+# HuggingFace model id.  Must be pre-downloaded on every node into
+# $HF_CACHE/hub/models--deepseek-ai--DeepSeek-V4-Flash/snapshots/<hash>/.
+# Use scripts/01-download-weights.sh, or `hf download $MODEL`.  ~158 GB.
+MODEL="deepseek-ai/DeepSeek-V4-Flash"
+HF_CACHE="$HOME/.cache/huggingface"
+
+# ─── Tuning recipe ─────────────────────────────────────────────────────────────
+# Name (no path, no .env) of a file under config/recipes/.  Selects the operating
+# point.  See docs/RECIPES.md for the workload→recipe table.
+#   interactive-200k  — production default: MTP on, 131k context, OSL<=8k
+#   long-output       — MTP off, OSL<=12k, no spec-decode variance
+#   concurrent-32k    — MAX_NUM_SEQS=4, peak aggregate ~35 tok/s, OSL<=4k
+# The `${RECIPE:-...}` form lets a one-off `RECIPE=long-output bash scripts/...`
+# override this default without editing the file.
+RECIPE="${RECIPE:-interactive-200k}"
+
+# ─── Networking / ports ────────────────────────────────────────────────────────
+# NCCL rendezvous (master) port for the cross-node `mp` executor.  Non-default
+# 29519 avoids ssh(22), trtllm sshd(2233), Ray(6379/8265), vLLM API(8000), and
+# torch-elastic's 29400-29500 range.
+HEAD_PORT=29519
+# OpenAI-compatible REST port, bound on the HEAD node only.
+API_PORT=8000
+
+# ─── Safety / ops ──────────────────────────────────────────────────────────────
+# OOM watchdog: free MiB below which trtllm/vllm is hard-killed cluster-wide
+# BEFORE `vm.panic_on_oom=1` reboots the box.  V4-Flash needs more headroom than
+# the TRT-LLM stack, so 4096 (not 2048).  See docs/TROUBLESHOOTING.md GOTCHA 1.
+WATCHDOG_THRESHOLD_MIB=4096
+
+# Where host-side logs (server stdout, watchdog, bench JSON) are written.
+LOG_DIR="$HOME/dsv4_logs"
+
+# Staging dir on each worker node where 03-start-serve.sh syncs run-node.sh +
+# config before launching the rank there.  Persistent (survives reboot, unlike
+# /tmp).  Created automatically.
+REMOTE_STAGE="$HOME/dual_ds_dsv4"
+
+# Peer address on the *201.x* subnet for 01-download-weights.sh rsync, so the
+# bulk weight transfer doesn't contend with NCCL traffic on 200.x.
+TRANSFER_PEER="192.168.201.45"

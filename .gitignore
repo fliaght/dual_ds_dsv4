@@ -1,0 +1,23 @@
+# Site-specific config (must not be committed)
+cluster.conf
+
+# Logs and bench results
+*.log
+*.json
+dsv4_logs/
+trtllm_spark_logs/
+
+# but DO keep the committed bench fixtures
+!bench/quality_cases.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
