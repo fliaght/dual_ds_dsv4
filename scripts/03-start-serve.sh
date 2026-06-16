@@ -64,14 +64,19 @@ done
 $ready || { echo "❌ Timeout. Tail of head log:"; tail -25 "$HEAD_LOG"; exit 1; }
 echo "✅ Service ready: http://127.0.0.1:$API_PORT"
 
-section "Verify NCCL is on RDMA (must be via NET/IB, never Socket/gdaki/MNNVL)"
+section "Verify cross-node TP is on RDMA (via NET/IB, not socket fallback)"
+# Count only the unambiguous fallback signal: a channel routed `via NET/Socket`.
+# Do NOT match bare 'MNNVL'/'gdaki' — healthy boots print benign status lines like
+# 'NCCL_MNNVL_ENABLE set by environment to 0' and 'comm ... MNNVL 0', which are
+# the features being DISABLED (what we want), not fallback. A real gdaki failure
+# segfaults and is already caught by the startup-error grep above.
 ib=$(grep -cE 'via NET/IB/[01]' "$HEAD_LOG" 2>/dev/null || echo 0)
-bad=$(grep -cE 'via NET/Socket|gdaki|MNNVL' "$HEAD_LOG" 2>/dev/null || echo 0)
-echo "  via NET/IB channels: $ib   |   socket/gdaki/MNNVL fallback lines: $bad"
-if [ "$ib" -gt 0 ] && [ "$bad" -eq 0 ]; then
+sock=$(grep -cE 'via NET/Socket' "$HEAD_LOG" 2>/dev/null || echo 0)
+echo "  via NET/IB channels: $ib   |   via NET/Socket (fallback): $sock"
+if [ "$ib" -gt 0 ] && [ "$sock" -eq 0 ]; then
   echo "  ✅ PASS — cross-node TP is on dual RoCE."
 else
-  echo "  ⚠️  Check $HEAD_LOG: expected via NET/IB/0 + via NET/IB/1, zero socket fallback."
+  echo "  ⚠️  Expected via NET/IB/0 + via NET/IB/1 and zero socket fallback — inspect $HEAD_LOG."
 fi
 
 section "Pre-warm (kills first-request JIT/autotune spikes; best-effort)"

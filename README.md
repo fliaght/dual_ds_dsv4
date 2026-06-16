@@ -70,6 +70,167 @@ only). `00-precheck.sh` validates your connection config — including that each
 `NODES` IP is actually on a RoCE interface — before anything is launched, so a
 new-pair misconfig fails in seconds, not minutes into NCCL bring-up.
 
+## Beginner's complete walkthrough
+
+Never deployed a cross-node model before? Follow this top to bottom. You run
+**every command from the HEAD node** (the first machine in `NODES`); the scripts
+reach the worker over SSH for you.
+
+### The mental model
+
+Two DGX Sparks act as **one** GPU big enough for a 158 GB model. The **head**
+(rank 0) serves the OpenAI API on port 8000; the **worker** (rank 1) holds half
+the model and has no API. They talk over the RoCE cables. You never log into the
+worker by hand — `scripts/` do it.
+
+### Step 0 — One-time prerequisites (do these once per pair)
+
+- [ ] Both Sparks powered on, on the same RoCE subnet, NICs Up
+      (`ibdev2netdev | grep -i up` shows `rocep1s0f0` + `roceP2p1s0f0`).
+- [ ] Passwordless SSH from head → worker works: `ssh <worker-ip> hostname`
+      returns the worker's name without a password prompt.
+- [ ] Docker installed on both, your user in the `docker` group
+      (`docker ps` works without `sudo`).
+- [ ] ~200 GB free disk on each node for the weights.
+
+### Step 1 — Tell the project about your machines
+
+```bash
+cd dual_ds_dsv4
+
+# Auto-detect your RoCE NIC names and IPs (pass the worker's SSH address):
+bash scripts/discover.sh 192.168.200.45
+```
+
+It prints something like:
+
+```
+  NODES="192.168.200.43 192.168.200.45"
+  IFACES="enp1s0f0np0,enP2p1s0f0np0"
+  TRANSFER_PEER="192.168.201.45"
+  ✅ NIC name sets match across all hosts.
+```
+
+Now create your config and paste those three lines in:
+
+```bash
+cp cluster.conf.example cluster.conf
+nano cluster.conf        # or vim/$EDITOR — paste NODES / IFACES / TRANSFER_PEER
+```
+
+> ⚠️ **The #1 mistake:** `NODES` must be the **RoCE-fabric IPs** that
+> `discover.sh` printed — *not* the management/Wi-Fi IP you SSH in with. Using the
+> wrong IP makes the two GPUs talk over slow TCP (≈10× slower) or hang forever.
+> The next step rejects this for you, so just trust `discover.sh`.
+
+### Step 2 — Download the model weights (~158 GB, ~30–45 min, once)
+
+```bash
+bash scripts/01-download-weights.sh        # downloads on head, copies to worker over 201.x
+```
+
+Skip this if both nodes already have
+`~/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4-Flash/`.
+
+### Step 3 — Bring the service up
+
+```bash
+bash scripts/quickstart.sh
+```
+
+This runs three steps in order and is safe to re-run:
+
+| Stage | What it does | Time |
+|---|---|---|
+| `00-precheck` | Validates NICs, SSH, RoCE addressing, ports, weights, memory | ~30 s |
+| `02-pull-image` | Pulls the 9 GB vLLM image on both nodes (skips if present) | 0–5 min |
+| `03-start-serve` | Boots worker, then head; waits for ready; verifies NCCL-over-RoCE; warms up | ~5–6 min |
+
+**What "it worked" looks like** — `03-start-serve` ends with:
+
+```
+✅ Service ready: http://127.0.0.1:8000
+  via NET/IB channels: 64   |   socket/gdaki/MNNVL fallback lines: 0
+  ✅ PASS — cross-node TP is on dual RoCE.
+```
+
+If it instead times out or errors, read the printed tail and
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — the error → fix table at
+the bottom maps almost every failure to a one-line fix.
+
+### Step 4 — Confirm the model answers
+
+```bash
+bash bench/smoke.sh        # sends 5 prompts (en/zh/ja + math + code); expects "391"
+```
+
+Success prints `✅ PASS: 5/5 prompts answered, math returned 391.`
+
+### Step 5 — Actually use the model
+
+It speaks the **OpenAI Chat Completions** protocol, so any OpenAI client works —
+just point it at `http://127.0.0.1:8000/v1` (run from the head node, or open an
+SSH tunnel `ssh -L 8000:127.0.0.1:8000 <head>` from your laptop).
+
+**curl:**
+
+```bash
+curl -s http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "messages": [{"role": "user", "content": "Explain TP=2 in one sentence."}],
+    "max_tokens": 128
+  }' | jq -r '.choices[0].message.content'
+```
+
+**Python (official `openai` package):**
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="not-needed")
+resp = client.chat.completions.create(
+    model="deepseek-ai/DeepSeek-V4-Flash",
+    messages=[{"role": "user", "content": "Write a haiku about GPUs."}],
+    stream=True,
+)
+for chunk in resp:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+Useful endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`
+(lists `max_model_len`), `/metrics` (Prometheus, incl. MTP acceptance),
+`/health`, `/docs` (interactive API browser).
+
+### Step 6 — Monitor while it runs
+
+```bash
+tail -f ~/dsv4_logs/vllm-dsv4-rank0.log        # head server log
+tail -f ~/dsv4_logs/watchdog-*.log             # OOM watchdog (auto-started)
+docker stats vllm-dsv4-mn                       # live memory/CPU
+```
+
+The **watchdog** runs in the background and hard-kills vLLM if free memory gets
+dangerously low — this is what protects you from the `panic_on_oom` whole-node
+reboot. Leave it running.
+
+### Step 7 — Stop (and switch recipes)
+
+```bash
+bash scripts/04-stop.sh --rm                    # clean shutdown + remove containers
+```
+
+To change the operating point (e.g. longer outputs, or batch throughput), edit
+`RECIPE=` in `cluster.conf`, then stop-with-`--rm` and re-run `03-start-serve.sh`.
+See [`docs/RECIPES.md`](docs/RECIPES.md) for the workload → recipe table.
+
+### Moving to a different pair of Sparks
+
+Just repeat Steps 1–3 with the new machines: `discover.sh` finds their NICs/IPs,
+you paste them into `cluster.conf`, and `00-precheck.sh` validates the new
+connection before anything launches. Nothing else changes — the image, model, and
+GPU-architecture settings are identical on every DGX Spark.
+
 ## Project layout
 
 ```
