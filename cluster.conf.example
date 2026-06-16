@@ -7,15 +7,26 @@
 # (it holds your site's IPs/paths) — cluster.conf.example is the committed template.
 
 # ─── Cluster topology ──────────────────────────────────────────────────────────
-# Space-separated node IPs on the *200.x RoCE subnet*.  The FIRST entry is the
-# HEAD (rank 0, serves the API); every later entry is a worker.  This project is
-# validated for exactly 2 DGX Sparks (TP=2); the scripts generalise to N but
-# >2 is untested on V4-Flash.
+# Don't know your values for a new Spark pair?  Run `bash scripts/discover.sh`
+# (and `bash scripts/discover.sh <worker-ssh-addr>` to include the worker) — it
+# prints ready-to-paste NODES / IFACES / TRANSFER_PEER lines.
+#
+# Space-separated node IPs, HEAD (rank 0, serves the API) FIRST, then workers.
+#
+# ⚠ CRITICAL: each entry MUST be the IP bound to a RoCE/IFACES interface — NOT the
+# machine's management/SSH IP.  A DGX Spark typically has BOTH (e.g. a 172.x mgmt
+# NIC and the 192.168.200.x RoCE NIC).  If you put management IPs here, every
+# precheck still passes but NCCL falls back to TCP socket (~10x slower decode) or
+# the cross-node rendezvous hangs.  Confirm with `ip -br addr show <IFACE>`.
+# (00-precheck.sh now enforces this — it rejects a NODES IP that isn't on IFACES.)
+# This project is validated for exactly 2 DGX Sparks (TP=2); scripts generalise
+# to N but >2 is untested on V4-Flash.
 NODES="192.168.200.43 192.168.200.45"
 
-# Comma-separated RoCE interface names present on *every* node.  Verify with
-# `ibdev2netdev | awk '/Up/{print $5}' | tr -d '()'` — names MUST match across
-# nodes.  Note the UPPERCASE 'P' in the second port: `enP2p1s0f0np0`.
+# Comma-separated RoCE interface names present (with the same names) on *every*
+# node.  Verify with `ibdev2netdev | awk '/Up)/{print $5}' | tr -d '()'`, or just
+# run scripts/discover.sh.  Note the UPPERCASE 'P' in the second port name:
+# `enP2p1s0f0np0` (a real case where Linux iface-name casing matters).
 IFACES="enp1s0f0np0,enP2p1s0f0np0"
 
 # Shared SSH key used for cross-node commands (00-precheck verifies it is

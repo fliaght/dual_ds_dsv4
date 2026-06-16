@@ -59,8 +59,14 @@ the sed hot-patch in `scripts/run-node.sh`.
 2. **Passwordless SSH** between nodes (default agent/key). The scripts use plain
    `ssh <ip>`; `cluster.conf`'s `SSH_KEY` is only verified for readability by the
    precheck. NVIDIA's `discover-sparks` provisions `~/.ssh/id_ed25519_shared`.
-3. **RoCE NICs Up** with IPs on the 200.x and 201.x subnets. Verify with
-   `ibdev2netdev | grep -i up` on every node (expect `rocep1s0f0` + `roceP2p1s0f0`).
+3. **RoCE NICs Up *and addressed*** — each `IFACES` interface must carry an IPv4
+   (a freshly-imaged Spark can have the RDMA link Up but no IP). Verify with
+   `ibdev2netdev | grep -i up` and `ip -br addr show <iface>`.
+   **`NODES` must list the RoCE-fabric IPs, not the management/SSH IPs.** A Spark
+   commonly has both (e.g. a `172.x` mgmt NIC and the `192.168.200.x` RoCE NIC);
+   using the wrong one makes NCCL fall back to TCP socket (~10× slower) or hang.
+   `scripts/discover.sh` prints the correct values, and `00-precheck.sh` rejects a
+   `NODES` IP that isn't on a RoCE interface before anything launches.
 4. **Docker daemon running** + your user in the `docker` group on every node.
 5. **`panic_on_oom` awareness**: DGX Spark ships `vm.panic_on_oom=1`, so an OOM
    reboots the whole node instantly (and, because both ranks do collective ops,

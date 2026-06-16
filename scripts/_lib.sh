@@ -53,7 +53,10 @@ ssh_node() {
   if _is_local "$node"; then
     bash -c "$*"
   else
-    ssh -o BatchMode=yes -o ConnectTimeout=5 "$node" "$*"
+    # accept-new: auto-trust the host key on first connect over the trusted
+    # direct-attach link, so a fresh pair doesn't fail with a confusing
+    # "ssh FAILED" that's really an unknown-host-key TOFU prompt.
+    ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$node" "$*"
   fi
 }
 

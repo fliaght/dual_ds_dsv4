@@ -190,6 +190,31 @@ A 120k-token prefill takes ~570 s cold. Default OpenAI-client timeouts (often
 
 ---
 
+## GOTCHA 12 — `NODES` set to management IPs (moving to a new Spark pair)
+
+**Symptom**: on a fresh pair everything "looks" configured — precheck's SSH and
+NIC checks pass — but decode is ~10× slower than expected, or rank 1 never
+connects and `03-start-serve.sh` ends in a generic 600 s timeout.
+
+**Root cause**: a DGX Spark usually has a **management/SSH NIC** (e.g. `172.x` on
+`enP7s7`) *in addition to* the RoCE fabric NICs (`192.168.200.x` / `201.x`). The
+`mp` executor advertises each rank at its `NODES` IP (`VLLM_HOST_IP` /
+`--master-addr`), while NCCL binds transports to the `IFACES` NIC **names**. If
+`NODES` holds the management IPs, those two disagree: NCCL either socket-falls-back
+(via the mgmt path, ~10× slower) or the cross-node rendezvous hangs. SSH succeeds
+either way, so the mistake is invisible to a naïve check.
+
+**Fix**:
+- Run `bash scripts/discover.sh <worker-ssh-addr>` — it reads `ibdev2netdev` +
+  `ip addr` and prints the correct RoCE `NODES` / `IFACES` / `TRANSFER_PEER`.
+- `00-precheck.sh` now **rejects** a `NODES` IP that isn't bound to an `IFACES`
+  interface, so this fails in seconds (`✗ NODES IP X is NOT on a RoCE iface`)
+  instead of minutes into NCCL bring-up.
+- After boot, `03-start-serve.sh`'s `via NET/IB` check is the post-hoc confirmation
+  (GOTCHA 6): socket fallback shows up as `via NET/Socket`.
+
+---
+
 ## Diagnosis cheat sheet
 
 | Log line / symptom | Gotcha → fix |
@@ -207,3 +232,5 @@ A 120k-token prefill takes ~570 s cold. Default OpenAI-client timeouts (often
 | `OSL=16384` always crashes | 9 — hard cliff; keep OSL ≤ 8k/12k |
 | Both nodes reboot, dmesg empty | 1 — keep watchdog on, lower util |
 | bench request times out at ~120 s on long prompt | 11 — raise `--timeout` |
+| New pair: decode ~10× slow OR rank 1 never connects | 12 — `NODES` holds mgmt IPs; run `discover.sh` |
+| precheck: `NODES IP X is NOT on a RoCE iface` | 12 — fix `NODES` to the RoCE-fabric IP |

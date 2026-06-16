@@ -10,7 +10,7 @@ Stages: short (warm tokenizer/sampler/MTP draft), mid (1-2 chunked-prefill
 iterations), long (long-chunk + sliding-window attention), rewarm (confirm
 short is now warm: expect < ~1.5 s wall, > ~20 tok/s).
 """
-import argparse, json, sys, time
+import argparse, json, os, sys, time
 import urllib.request
 
 ALICE = (
@@ -53,7 +53,7 @@ def call(url, model, label, isl_chars, max_tokens):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--url", default="http://127.0.0.1:8000/v1/chat/completions")
+    p.add_argument("--url", default=f"http://127.0.0.1:{os.environ.get('API_PORT', '8000')}/v1/chat/completions")
     p.add_argument("--model", default="deepseek-ai/DeepSeek-V4-Flash")
     args = p.parse_args()
 

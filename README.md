@@ -45,8 +45,13 @@ Full list + setup: [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md).
 
 ```bash
 cd dual_ds_dsv4
+
+# New pair? Auto-discover your RoCE NIC names + IPs (pass the worker's ssh addr too):
+bash scripts/discover.sh 192.168.200.45   # prints ready-to-paste NODES/IFACES/TRANSFER_PEER
+
 cp cluster.conf.example cluster.conf
-$EDITOR cluster.conf                  # set NODES, IFACES, MODEL, paths, RECIPE
+$EDITOR cluster.conf                  # paste NODES/IFACES + set MODEL, paths, RECIPE
+                                      # ⚠ NODES must be the RoCE-fabric IPs, NOT management/SSH IPs
 
 # One-time: fetch ~158 GB of weights to every node (head download + rsync to workers)
 bash scripts/01-download-weights.sh
@@ -60,7 +65,10 @@ bash bench/run_full_bench.sh           # perf matrix
 ```
 
 Run everything **from the head node** (`NODES[0]`). After quickstart the service
-is at `http://127.0.0.1:8000` (OpenAI-compatible, head node only).
+is at `http://127.0.0.1:$API_PORT` (default `8000`, OpenAI-compatible, head node
+only). `00-precheck.sh` validates your connection config — including that each
+`NODES` IP is actually on a RoCE interface — before anything is launched, so a
+new-pair misconfig fails in seconds, not minutes into NCCL bring-up.
 
 ## Project layout
 
@@ -74,8 +82,9 @@ is at `http://127.0.0.1:8000` (OpenAI-compatible, head node only).
 │       ├── long-output.env        # MTP off, OSL<=12k
 │       └── concurrent-32k.env     # MAX_NUM_SEQS=4, peak aggregate ~35 tok/s
 ├── scripts/
+│   ├── discover.sh           # auto-detect RoCE NIC names + IPs → paste into cluster.conf
 │   ├── quickstart.sh         # 00 → 02 → 03 in sequence
-│   ├── 00-precheck.sh        # NICs Up, ssh, docker, model cache, headroom
+│   ├── 00-precheck.sh        # NICs Up + NODES-IP-on-RoCE + port free, ssh, model cache, headroom
 │   ├── 01-download-weights.sh# hf download on head + rsync to workers over 201.x
 │   ├── 02-pull-image.sh      # pull the vLLM image on all nodes (parallel)
 │   ├── 03-start-serve.sh     # boot worker-first, wait ready, verify NCCL/IB, prewarm
@@ -110,6 +119,9 @@ A few high-frequency ones:
 - **Both nodes reboot, no logs** → `panic_on_oom`; keep the watchdog on (GOTCHA 1)
 - **rank 1 segfault `gdaki`** → NCCL conservative env not exported (GOTCHA 6)
 - **Won't boot below weight size** → raise `GPU_MEM_UTIL` ≥ 0.70 (GOTCHA 5)
+- **Decode ~10× slow, or rank 1 never connects** → `NODES` holds management IPs,
+  not the RoCE-fabric IPs. Run `bash scripts/discover.sh`; `00-precheck.sh` now
+  rejects this before launch.
 
 ## Graceful stop
 

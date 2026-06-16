@@ -11,7 +11,7 @@ multi-minute cold prefills at 65k-120k context. Lower them with --timeout /
 
     python3 bench/bench_openai.py --isl 128 1024 --osl 128 --conc 1 4 --n 8
 """
-import argparse, asyncio, json, statistics, sys, time
+import argparse, asyncio, json, os, statistics, sys, time
 from typing import Optional
 try:
     import aiohttp
@@ -116,7 +116,8 @@ async def run_cell(url, model, isl, osl, conc, n_req, req_timeout, cell_timeout)
 
 async def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--url", default="http://127.0.0.1:8000/v1/chat/completions")
+    p.add_argument("--url", default=f"http://127.0.0.1:{os.environ.get('API_PORT', '8000')}/v1/chat/completions",
+                   help="defaults to API_PORT env (else 8000); run_full_bench.sh passes it explicitly")
     p.add_argument("--model", default="deepseek-ai/DeepSeek-V4-Flash")
     p.add_argument("--isl", nargs="+", type=int, default=[128, 1024])
     p.add_argument("--osl", nargs="+", type=int, default=[128])
