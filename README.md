@@ -99,8 +99,8 @@ large), and the RoCE fabric + SSH wired up. Do this once per pair.
 **0a — Get this repo on the HEAD node**
 
 ```bash
-git clone <your-repo-url> dual_ds_dsv4    # replace with the URL you were given,
-cd dual_ds_dsv4                            # or scp/rsync the folder over instead
+git clone https://github.com/fliaght/dual_ds_dsv4    # or scp/rsync the folder over
+cd dual_ds_dsv4
 ```
 
 `git` is preinstalled on DGX Spark; if not, `sudo apt-get install -y git`.
