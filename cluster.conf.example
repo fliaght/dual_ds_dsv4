@@ -29,10 +29,11 @@ NODES="192.168.200.43 192.168.200.45"
 # `enP2p1s0f0np0` (a real case where Linux iface-name casing matters).
 IFACES="enp1s0f0np0,enP2p1s0f0np0"
 
-# Shared SSH key used for cross-node commands (00-precheck verifies it is
-# readable).  ssh itself uses your default agent/key; this is just for the
-# precheck and for documenting the expected provisioning.
-SSH_KEY="$HOME/.ssh/id_ed25519_shared"
+# Optional shared SSH key path for 00-precheck to verify is readable on every
+# node.  Leave EMPTY to SKIP that check — ordinary passwordless SSH via your
+# default agent/key is all the scripts actually need.  Set this only if your site
+# uses a specific shared key and you want the precheck to confirm it on both nodes.
+SSH_KEY=""
 
 # ─── Container image ───────────────────────────────────────────────────────────
 # Community vLLM fork built for ARM64 / sm_121 (GB10) with the DeepSeek-V4-Flash

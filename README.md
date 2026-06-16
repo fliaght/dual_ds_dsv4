@@ -1,5 +1,7 @@
 # dual_ds_dsv4 — DeepSeek-V4-Flash on two stacked DGX Sparks
 
+**English** | [中文 (Chinese)](README.zh-CN.md)
+
 Serve **`deepseek-ai/DeepSeek-V4-Flash`** — a 284 B-param / 13 B-active MoE with
 native 1 M context (~158 GB, mixed FP4+FP8) — across **two QSFP-linked DGX
 Sparks** with cross-node tensor parallelism (TP=2) on a community vLLM build for
@@ -43,6 +45,10 @@ Full list + setup: [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md).
 
 ## Quickstart
 
+> **Factory-fresh pair?** Do **[Step 0 — Bootstrap](#step-0--bootstrap-a-brand-new-pair-first-time-only)**
+> first (clone the repo, install tools, log in to HF, wire up SSH). This block
+> assumes the repo is already cloned and passwordless SSH to the worker works.
+
 ```bash
 cd dual_ds_dsv4
 
@@ -83,15 +89,75 @@ Two DGX Sparks act as **one** GPU big enough for a 158 GB model. The **head**
 the model and has no API. They talk over the RoCE cables. You never log into the
 worker by hand — `scripts/` do it.
 
-### Step 0 — One-time prerequisites (do these once per pair)
+### Step 0 — Bootstrap a brand-new pair (first time only)
 
-- [ ] Both Sparks powered on, on the same RoCE subnet, NICs Up
-      (`ibdev2netdev | grep -i up` shows `rocep1s0f0` + `roceP2p1s0f0`).
-- [ ] Passwordless SSH from head → worker works: `ssh <worker-ip> hostname`
-      returns the worker's name without a password prompt.
-- [ ] Docker installed on both, your user in the `docker` group
-      (`docker ps` works without `sudo`).
-- [ ] ~200 GB free disk on each node for the weights.
+DGX Sparks ship with the NVIDIA driver, CUDA, Docker, and the RDMA tools
+(`ibdev2netdev`) already installed. From a **factory-fresh** pair you still need
+four things: this repo, a few host tools, a HuggingFace login (the weights are
+large), and the RoCE fabric + SSH wired up. Do this once per pair.
+
+**0a — Get this repo on the HEAD node**
+
+```bash
+git clone <your-repo-url> dual_ds_dsv4    # replace with the URL you were given,
+cd dual_ds_dsv4                            # or scp/rsync the folder over instead
+```
+
+`git` is preinstalled on DGX Spark; if not, `sudo apt-get install -y git`.
+
+**0b — Install the host tools the scripts use** (run on the head **and** the worker)
+
+```bash
+sudo apt-get update && sudo apt-get install -y git jq rsync bc curl netcat-openbsd iproute2
+pip install --user "huggingface_hub[cli,hf_transfer]" aiohttp openai
+#   jq → parse JSON   rsync → copy weights   bc → bench timing   hf → download
+#   aiohttp → bench_openai.py    openai → the client example in Step 5
+```
+
+> ⚠️ `pip --user` installs `hf` into `~/.local/bin`, which is **not** on `PATH`
+> for the non-login SSH shells the scripts use — so weight download would fail
+> with `hf: command not found`. Put it on PATH on **both** nodes:
+> ```bash
+> echo 'export PATH=$HOME/.local/bin:$PATH' | tee -a ~/.bashrc ~/.profile
+> ```
+> And if `docker ps` needs `sudo`, add yourself to the docker group (both nodes):
+> `sudo usermod -aG docker $USER && newgrp docker`.
+
+**0c — Log in to HuggingFace** (needed to pull the ~158 GB weights)
+
+```bash
+hf auth login        # paste a token from https://huggingface.co/settings/tokens
+```
+
+Also open <https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash> and **accept the
+license / request access** with the same account first — otherwise the download
+401s after a successful login.
+
+**0d — Wire up the RoCE fabric + passwordless SSH** (the part unique to a fresh pair)
+
+- **Cable** the two Sparks directly with QSFP: port 1 ↔ port 1 (carries the
+  200.x subnet), port 2 ↔ port 2 (201.x). No switch.
+- **Give each RoCE NIC a static IP** on a shared subnet — e.g. head
+  `192.168.200.43/24` and worker `192.168.200.45/24` on `enp1s0f0np0`, and
+  `192.168.201.{43,45}/24` on `enP2p1s0f0np0`. NVIDIA's
+  [`dgx-spark-playbooks`](https://github.com/NVIDIA/dgx-spark-playbooks)
+  `discover-sparks` automates the cabling discovery **and** the SSH key exchange;
+  or set static IPs by hand (netplan / `nmcli`).
+- **Passwordless SSH** from head → worker:
+  ```bash
+  ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_shared -N ''     # skip if you already have a key
+  ssh-copy-id -i ~/.ssh/id_ed25519_shared.pub <worker-ip>
+  ssh <worker-ip> hostname                                     # must return the worker's name, no password
+  ```
+- *(Recommended)* the kernel reboots the whole box on any OOM (`vm.panic_on_oom=1`).
+  The built-in watchdog protects you, but you may also `sudo sysctl vm.panic_on_oom=0`.
+
+**Verify you're ready** — all of these should hold on **both** nodes:
+
+- [ ] `ibdev2netdev | grep -i up` shows the two RoCE NICs Up (`rocep1s0f0` + `roceP2p1s0f0`)
+- [ ] `ssh <worker-ip> hostname` returns the worker's name with **no** password prompt
+- [ ] `docker ps` works without `sudo` (your user is in the `docker` group)
+- [ ] ~200 GB free disk on each node for the weights
 
 ### Step 1 — Tell the project about your machines
 
@@ -150,7 +216,7 @@ This runs three steps in order and is safe to re-run:
 
 ```
 ✅ Service ready: http://127.0.0.1:8000
-  via NET/IB channels: 64   |   socket/gdaki/MNNVL fallback lines: 0
+  via NET/IB channels: 64   |   via NET/Socket (fallback): 0
   ✅ PASS — cross-node TP is on dual RoCE.
 ```
 
