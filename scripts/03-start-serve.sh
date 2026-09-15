@@ -70,8 +70,11 @@ section "Verify cross-node TP is on RDMA (via NET/IB, not socket fallback)"
 # 'NCCL_MNNVL_ENABLE set by environment to 0' and 'comm ... MNNVL 0', which are
 # the features being DISABLED (what we want), not fallback. A real gdaki failure
 # segfaults and is already caught by the startup-error grep above.
-ib=$(grep -cE 'via NET/IB/[01]' "$HEAD_LOG" 2>/dev/null || echo 0)
-sock=$(grep -cE 'via NET/Socket' "$HEAD_LOG" 2>/dev/null || echo 0)
+# NB: `grep -c` prints "0" AND exits 1 on zero matches, so `|| echo 0` would yield
+# "0\n0" and break the integer test below (false ⚠️ on a healthy boot).  Use
+# `|| true` + a default instead, which also covers a missing log file.
+ib=$(grep -cE 'via NET/IB/[01]' "$HEAD_LOG" 2>/dev/null || true); ib=${ib:-0}
+sock=$(grep -cE 'via NET/Socket' "$HEAD_LOG" 2>/dev/null || true); sock=${sock:-0}
 echo "  via NET/IB channels: $ib   |   via NET/Socket (fallback): $sock"
 if [ "$ib" -gt 0 ] && [ "$sock" -eq 0 ]; then
   echo "  ✅ PASS — cross-node TP is on dual RoCE."
