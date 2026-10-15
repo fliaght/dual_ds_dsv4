@@ -2,11 +2,13 @@
 # TensorFold adapter (jayleaton/deepseek-v41-tensorfold-spark, Python path): our UMA precheck and
 # memory guards around its scripts/serve.sh. Serving path since 2026-10-15; vLLM (v41-service.sh) is the fallback.
 #
-#   bash scripts/tf-service.sh setup | start | stop | status
+#   bash scripts/tf-service.sh setup | start | stop | status | gateway
 #
 # TF_DIR is the pinned recipe checkout with our patches (config/tensorfold) and its git-ignored
 # config/prod.env, which `setup` generates from cluster.conf (Docs/runbooks/tensorfold.md).
-# Never run it beside the vLLM service: same GPUs, port 8000.
+# TensorFold listens on 127.0.0.1:$TF_PORT; clients use the single-request gateway (tf_gateway.py)
+# on :$API_PORT, so the server never queues a request (upstream #13). `gateway` restarts only the
+# gateway (refused while it serves a request unless FORCE=1). Never run beside the vLLM service.
 set -euo pipefail
 source "$(dirname "$0")/_lib.sh"
 : "${V41_PACKED_DIR:?TensorFold reads packed Engram: set V41_PACKED_DIR in cluster.conf (v41-service.sh pack)}"
@@ -15,9 +17,13 @@ TF_STATE="${TF_STATE:-$HOME/tf-state}"
 TF_RECIPE_URL=https://github.com/jayleaton/deepseek-v41-tensorfold-spark.git
 TF_RECIPE_COMMIT=2dcce0303451da2a59f80e6c7413da8b3b0f7a57
 TF_IMAGE="${TF_IMAGE:-dsv41-tensorfold:060-g19-2dcce03}"
+TF_PORT="${TF_PORT:-8100}"                       # TensorFold itself, loopback only
+GATEWAY_HOST="${TF_GATEWAY_HOST:-127.0.0.1}"     # the gateway on :$API_PORT; 0.0.0.0 opens the API to the LAN
 TF_CONF="$ROOT_DIR/config/tensorfold"
 TF_NAME=dsv41-tf
 GUARD_UNIT=dsv41-tf-guard
+GATEWAY_UNIT=dsv41-tf-gateway
+GATEWAY_URL="http://${GATEWAY_HOST/#0.0.0.0/127.0.0.1}:$API_PORT/gateway/status"
 ACTION="${1:-status}"
 
 serve() { (cd "$TF_DIR" && scripts/serve.sh "$@"); }
@@ -60,7 +66,7 @@ write_env() {  # recipe example minus unset.keys, then cluster.conf values, then
       "IMAGE=$TF_IMAGE" "CACHE_VOL=$TF_STATE/cache" "HEAD_MODEL=$V41_MODEL_DIR" "WORKER_MODEL=$V41_MODEL_DIR" \
       "HEAD_ENGRAM=$V41_PACKED_DIR" "WORKER_ENGRAM=$V41_PACKED_DIR" "HEAD_PREPARED=$TF_STATE/prepared" \
       "WORKER_PREPARED=$TF_STATE/prepared" "HEAD_STATE=$TF_STATE/state" "WORKER_STATE=$TF_STATE/state" \
-      "STATE_DIR=$TF_STATE/ops" "NAME=$TF_NAME" "PORT=$API_PORT" "SERVED_NAME=$MODEL"; do
+      "STATE_DIR=$TF_STATE/ops" "NAME=$TF_NAME" "PORT=$TF_PORT" "SERVED_NAME=$MODEL"; do
     printf '%s=%q\n' "${kv%%=*}" "${kv#*=}"
   done
   printf '\n# ===== dual_ds_dsv4: config/tensorfold/site.env =====\n'
@@ -86,7 +92,30 @@ setup() {  # pinned checkout + our patches + generated prod.env; never overwrite
   else echo "$env differs; review then move into place:"; diff -u "$env" "$env.new" | tail -n +3 || true; fi
 }
 
+gateway_start() {  # (re)start the gateway; refuses while it is serving a request unless FORCE=1
+  local state
+  if state=$(curl -fsS --max-time 3 "$GATEWAY_URL" 2>/dev/null) && [ "${FORCE:-0}" != 1 ] &&
+      ! python3 -c 'import json,sys; s=json.load(sys.stdin); sys.exit(1 if s["busy"] or s["queued"] else 0)' <<<"$state"; then
+    echo "gateway is serving a request; retry when idle or set FORCE=1" >&2; return 1
+  fi
+  systemctl --user stop "$GATEWAY_UNIT" 2>/dev/null || true
+  systemd-run --user --unit="$GATEWAY_UNIT" --collect -p Restart=on-failure -p RestartSec=2 \
+    -p MemoryMax=256M -p MemorySwapMax=0 \
+    -p "StandardOutput=append:$LOG_DIR/tf-gateway.log" -p "StandardError=append:$LOG_DIR/tf-gateway.log" \
+    /usr/bin/python3 "$ROOT_DIR/scripts/tf_gateway.py" --host "$GATEWAY_HOST" --port "$API_PORT" \
+    --upstream "http://127.0.0.1:$TF_PORT" --log "$LOG_DIR/tf-gateway.jsonl"
+  local i
+  for i in $(seq 25); do
+    if curl -fsS --max-time 2 "$GATEWAY_URL" >/dev/null 2>&1; then
+      echo "gateway $GATEWAY_HOST:$API_PORT -> 127.0.0.1:$TF_PORT"; return 0
+    fi
+    sleep 0.2
+  done
+  echo "gateway did not answer on :$API_PORT (see $LOG_DIR/tf-gateway.log)" >&2; return 1
+}
+
 stop_all() {
+  systemctl --user stop "$GATEWAY_UNIT" 2>/dev/null || true
   serve stop || true
   for_each_node "systemctl --user stop $GUARD_UNIT 2>/dev/null || true; docker rm -f $TF_NAME-r0 $TF_NAME-r1 >/dev/null 2>&1 || true"
 }
@@ -95,6 +124,8 @@ case "$ACTION" in
   setup)
     setup ;;
   start)
+    grep -qx "PORT=$TF_PORT" "$TF_DIR/config/prod.env" ||
+      { echo "prod.env must set PORT=$TF_PORT (the gateway owns :$API_PORT): run setup and review prod.env.new" >&2; exit 1; }
     precheck
     worker="${NODE_ARR[1]}"
     ssh_node "$worker" "mkdir -p '$REMOTE_STAGE/scripts'"
@@ -102,17 +133,20 @@ case "$ACTION" in
     bash -c "$(guard_cmd 0 "$ROOT_DIR" "$worker")"
     ssh_node "$worker" "$(guard_cmd 1 "$REMOTE_STAGE" "$LEADER")"
     for_each_node "systemctl --user is-active $GUARD_UNIT"
-    if ! { serve preflight && serve start; }; then
-      echo 'TensorFold start failed; stopping both ranks and guards' >&2
+    if ! { serve preflight && serve start && gateway_start; }; then
+      echo 'TensorFold start failed; stopping the gateway, both ranks and guards' >&2
       stop_all; exit 1
     fi
     for_each_node "systemctl --user is-active $GUARD_UNIT" ;;
+  gateway)
+    gateway_start ;;
   stop)
     stop_all
     for_each_node "docker ps -a --filter name=$TF_NAME --format '{{.Names}} {{.Status}}'" ;;
   status)
     serve status || true
+    echo "gateway: $(systemctl --user show "$GATEWAY_UNIT" -p ActiveState --value) $(curl -fsS --max-time 3 "$GATEWAY_URL" 2>/dev/null)"
     for_each_node "systemctl --user show $GUARD_UNIT -p ActiveState --value; cat $LOG_DIR/tf-guard.json 2>/dev/null | cut -c1-200" ;;
   *)
-    echo "usage: $0 setup|start|stop|status" >&2; exit 2 ;;
+    echo "usage: $0 setup|start|stop|status|gateway" >&2; exit 2 ;;
 esac

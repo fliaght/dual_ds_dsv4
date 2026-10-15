@@ -194,7 +194,7 @@ print(json.dumps(reply))
         prod = tf / "config" / "prod.env"
         effective = self.run_shell(f"set -a; source {shlex.quote(str(prod))}; set +a; env", **env).stdout
         for line in ("CONTEXT=425984", "PARALLEL=1", "TF_DSV41_EXPERT_TOPP_LIKE=1", "WORKER_SSH=",
-                     "HEAD_IB_HCA=rocep1s0f0,roceP2p1s0f0", "TF_DSV41_PREFILL=full",
+                     "HEAD_IB_HCA=rocep1s0f0,roceP2p1s0f0", "TF_DSV41_PREFILL=full", "PORT=8100\n",
                      "SERVED_NAME=dealignai/DeepSeek-V4.1-Flash-UNCENSORED-EXL3-2.9bpw"):
             self.assertIn(line, effective)
         self.assertNotIn("NCCL_IB_HCA=", effective)
@@ -205,6 +205,29 @@ print(json.dumps(reply))
         self.run_shell("bash scripts/tf-service.sh setup", **env)
         self.assertIn("LOCAL_EDIT=1", prod.read_text())               # never overwritten
         self.assertTrue((tf / "config" / "prod.env.new").exists())
+
+    def test_tf_gateway_restart_waits_for_idle_and_points_at_tensorfold(self):
+        with (self.root / "cluster.conf").open("a") as config:
+            config.write(f'\nNODES="192.0.2.1 192.0.2.2"\nV41_PACKED_DIR={shlex.quote(str(self.root / "packed"))}\n')
+        self.fake("ip", "print('eth0 UP 192.0.2.1/24')\n")
+        self.fake("curl", "print(os.environ.get('MOCK_STATUS', '{\"busy\": false, \"queued\": 0}'))\n")
+        self.fake("systemctl", "")
+        self.fake("systemd-run", "")
+        busy = self.run_shell("bash scripts/tf-service.sh gateway", RECIPE="v41-416k",
+                              MOCK_STATUS='{"busy": true, "queued": 0}')
+        self.assertEqual(busy.returncode, 1)
+        self.assertIn("serving a request", busy.stderr)
+        self.assertFalse(any(call[0].endswith("systemd-run") for call in self.read_calls()))
+        result = self.run_shell("bash scripts/tf-service.sh gateway", RECIPE="v41-416k", TF_GATEWAY_HOST="0.0.0.0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = next(call for call in self.read_calls() if call[0].endswith("systemd-run"))
+        self.assertIn("--unit=dsv41-tf-gateway", run)
+        self.assertIn("MemoryMax=256M", run)
+        args = run[run.index("/usr/bin/python3") + 1:]
+        self.assertTrue(args[0].endswith("scripts/tf_gateway.py"))
+        self.assertEqual(args[1:7], ["--host", "0.0.0.0", "--port", "8000", "--upstream", "http://127.0.0.1:8100"])
+        probes = [call[-1] for call in self.read_calls() if call[0].endswith("curl")]
+        self.assertTrue(probes and all(url == "http://127.0.0.1:8000/gateway/status" for url in probes))
 
 
 if __name__ == "__main__":

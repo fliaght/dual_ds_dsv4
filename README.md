@@ -36,8 +36,9 @@ bash chat/run_chat.sh --daemon   # optional chat UI, port 9450
 bash scripts/04-stop.sh --rm     # stop and remove the model containers
 ```
 
-The vLLM path binds the API to `0.0.0.0:8000`; the TensorFold service listens on
-`127.0.0.1:8000` only. Procedures, expected results and limitations are in
+The vLLM path binds the API to `0.0.0.0:8000`. On the TensorFold path a single-request gateway
+owns port 8000 (open to the LAN at this site, no authentication) and TensorFold itself listens on
+`127.0.0.1:8100` only. Procedures, expected results and limitations are in
 [service operations](Docs/runbooks/service.md) and the [TensorFold runbook](Docs/runbooks/tensorfold.md).
 
 ## Structure and documentation

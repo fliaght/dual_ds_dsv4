@@ -32,7 +32,8 @@ bash chat/run_chat.sh --daemon   # 可选聊天界面，端口 9450
 bash scripts/04-stop.sh --rm     # 停止并移除模型容器
 ```
 
-vLLM 路径的 API 绑定 `0.0.0.0:8000`；TensorFold 服务只监听 `127.0.0.1:8000`。
+vLLM 路径的 API 绑定 `0.0.0.0:8000`；TensorFold 路径由单请求网关占用 8000 端口（本站对局域网开放、无鉴权），
+TensorFold 本身只监听 `127.0.0.1:8100`。
 操作步骤、成功标准及限制见[服务操作](Docs/runbooks/service.md)与 [TensorFold runbook](Docs/runbooks/tensorfold.md)。
 
 ## 项目结构与文档入口
