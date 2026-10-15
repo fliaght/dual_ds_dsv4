@@ -101,6 +101,22 @@ class StreamChatTests(unittest.TestCase):
             with self.assertRaisesRegex(llm_client.LLMError, "memory floor"):
                 list(cli.stream_chat([{"role": "user", "content": "hi"}]))
 
+    def test_count_tokens_uses_the_server_tokenizer(self):
+        cli = LLMClient("http://h:8000/v1", model="m")
+        ok = mock.Mock(status_code=200, json=lambda: {"count": 7, "tokens": [1] * 7})
+        with mock.patch.object(llm_client.requests, "post", return_value=ok) as post:
+            self.assertEqual(cli.count_tokens("some thinking"), 7)
+            self.assertEqual(cli.count_tokens(""), 0)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.args[0], "http://h:8000/tokenize")
+        self.assertEqual(post.call_args.kwargs["json"], {"prompt": "some thinking", "add_special_tokens": False,
+                                                        "model": "m"})
+        with mock.patch.object(llm_client.requests, "post", side_effect=llm_client.requests.ConnectionError()):
+            self.assertIsNone(cli.count_tokens("x"))
+        bad = mock.Mock(status_code=200, json=lambda: {"count": "7"})
+        with mock.patch.object(llm_client.requests, "post", return_value=bad):
+            self.assertIsNone(cli.count_tokens("x"))
+
     def test_bad_level_rejected(self):
         with self.assertRaises(ValueError):
             _run([], thinking="medium")

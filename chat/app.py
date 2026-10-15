@@ -12,6 +12,7 @@ streams from vLLM.  Every turn is appended to the server-side audit log
 """
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import time
@@ -22,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import streamlit as st  # noqa: E402
 import streamlit.components.v1 as components  # noqa: E402
 
-from context import build_context, estimate_tokens  # noqa: E402
+from context import build_context, estimate_tokens, token_caption, token_meta  # noqa: E402
 from llm_client import THINKING_LEVELS, LLMError  # noqa: E402
 from request_queue import QueueFull, QueueTimeout, UserBusy  # noqa: E402
 from runtime import get_client, get_logger, get_monitor, get_queue  # noqa: E402
@@ -177,6 +178,9 @@ def _theme() -> str:
 
 
 def _trend_chart(rows: list[dict], field: str, title: str, labels: list[str]):
+    # altair reads sys.modules['pandas'] directly; a real import waits for another session's half-done one
+    # (sessions reconnecting together after a restart: Docs/kedb/runtime.md)
+    importlib.import_module("pandas")
     import altair as alt
     colors = SERIES_COLORS[_theme()][:len(labels)]
     hover = alt.selection_point(fields=["t"], nearest=True, on="pointerover", empty=False, clear="pointerout")
@@ -251,9 +255,7 @@ def monitor_panel():
 
 # -------------------------------------------------------------- chat view
 def _meta_caption(meta: dict) -> str:
-    bits = []
-    if meta.get("completion_tokens") is not None:
-        bits.append(f"{meta['completion_tokens']:,} tok")
+    bits = token_caption(meta)
     if meta.get("tok_s"):
         bits.append(f"{meta['tok_s']:.1f} tok/s")
     if meta.get("ttft_s") is not None:
@@ -420,6 +422,9 @@ def _finish_turn(conv, record, ticket, text, reasoning, usage, finish, t_submit,
         "tok_s": round(ctoks / gen_s, 1) if (ctoks and gen_s > 0) else None,
         "finish_reason": finish,
     }
+    if done:                 # the status line's numbers; a stopped reply shows no status line (no /tokenize call)
+        meta.update(token_meta(usage, text, reasoning, record["context"]["est_prompt_tokens"],
+                               record["params"]["thinking"] != "off", LLM.count_tokens, LLM.max_model_len))
     status = "ok" if done else ("error" if err else "interrupted")
     msg = {"role": "assistant", "content": text, "ts": now_iso(), "status": status, "meta": meta}
     if reasoning:

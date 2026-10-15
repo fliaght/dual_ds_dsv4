@@ -141,6 +141,22 @@ class LLMClient:
                 return None
         return self._max_model_len
 
+    def count_tokens(self, text: str) -> Optional[int]:
+        """Tokens in ``text`` by the server's own tokenizer (``POST /tokenize``, vLLM's shape, no special
+        tokens), or None when the server cannot say. TensorFold answers it on the host, outside the queue."""
+        if not text:
+            return 0
+        body = {"prompt": text, "add_special_tokens": False}
+        if self.model:
+            body["model"] = self.model
+        try:
+            r = requests.post(f"{self.root_url}/tokenize", json=body, timeout=(self.connect_timeout, 30))
+            r.raise_for_status()
+            count = r.json().get("count")
+        except (requests.RequestException, ValueError, AttributeError):
+            return None
+        return count if isinstance(count, int) and not isinstance(count, bool) else None
+
     # ------------------------------------------------------------- streaming
     def stream_chat(
         self,

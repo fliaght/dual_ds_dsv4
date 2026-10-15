@@ -2,7 +2,7 @@ import json, os, sys, tempfile, unittest
 from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from storage import ChatLogger, Conversation, clean_id
-from context import build_context, estimate_tokens
+from context import build_context, estimate_tokens, token_caption, token_meta
 
 
 class ConversationTests(unittest.TestCase):
@@ -55,6 +55,38 @@ class LoggerTests(unittest.TestCase):
             self.assertTrue(all(r["kind"] == "turn" and "ts" in r for r in recs))
             self.assertEqual(json.loads(ev[0].read_text())["event"], "session_start")
             self.assertEqual(oct(os.stat(Path(tmp) / "chat").st_mode & 0o777), "0o700")
+
+
+class TokenMetaTests(unittest.TestCase):
+    def test_exact_numbers_from_usage_and_the_tokenizer(self):
+        seen = []
+        meta = token_meta({"prompt_tokens": 18000, "completion_tokens": 452}, "answer", "plan", 99, True,
+                          lambda t: seen.append(t) or 236, 425984)
+        self.assertEqual(seen, ["plan"])
+        self.assertEqual(meta, {"context_tokens": 18452, "context_exact": True, "context_limit": 425984,
+                                "reasoning_tokens": 236, "reasoning_exact": True})
+        self.assertEqual(token_caption(meta), ["conversation 18,452 tok (4.3% of context)", "thinking 236 tok"])
+
+    def test_estimates_are_marked_and_thinking_off_shows_one_number(self):
+        meta = token_meta(None, "abc" * 7, "思考", 1000, True, lambda t: None, None)
+        self.assertEqual(meta["context_tokens"], 1000 + estimate_tokens("abc" * 7) + estimate_tokens("思考"))
+        self.assertEqual(token_caption(meta), [f"conversation ≈{meta['context_tokens']:,} tok", "thinking ≈3 tok"])
+        off = token_meta({"prompt_tokens": 40, "completion_tokens": 2}, "hi", "", 0, False,
+                         lambda t: self.fail("no thinking, no count"), 425984)
+        self.assertEqual(token_caption(off), ["conversation 42 tok (<0.1% of context)"])
+        empty = token_meta({"prompt_tokens": 40, "completion_tokens": 2}, "hi", "", 0, True, lambda t: 0, None)
+        self.assertEqual(token_caption(empty), ["conversation 42 tok", "thinking 0 tok"])
+
+    def test_old_and_untrusted_meta_never_break_the_caption(self):
+        self.assertEqual(token_caption({"completion_tokens": 1234}), ["1,234 tok"])
+        self.assertEqual(token_caption({"context_tokens": "9", "reasoning_tokens": -1}), [])
+        self.assertEqual(token_caption({"context_tokens": 10, "context_exact": True, "context_limit": "x",
+                                        "reasoning_tokens": float("inf")}), ["conversation 10 tok"])
+        kept = Conversation.from_untrusted({"messages": [{"role": "assistant", "content": "a", "meta": {
+            "context_tokens": 5, "context_exact": True, "context_limit": 100, "reasoning_tokens": 2,
+            "reasoning_exact": False}}]}, 10)
+        self.assertEqual(token_caption(kept.messages[0]["meta"]),
+                         ["conversation 5 tok (5.0% of context)", "thinking ≈2 tok"])
 
 
 class ContextTests(unittest.TestCase):
