@@ -141,14 +141,9 @@ class LLMClient:
                 return None
         return self._max_model_len
 
-    def count_tokens(self, text: str) -> Optional[int]:
-        """Tokens in ``text`` by the server's own tokenizer (``POST /tokenize``, vLLM's shape, no special
-        tokens), or None when the server cannot say. TensorFold answers it on the host, outside the queue."""
-        if not text:
-            return 0
-        body = {"prompt": text, "add_special_tokens": False}
-        if self.model:
-            body["model"] = self.model
+    def _tokenize(self, body: dict) -> Optional[int]:
+        """``POST /tokenize`` (vLLM's shape) -> ``count``, or None when the server cannot say. TensorFold
+        answers it on the host, and the gateway passes it through without queueing."""
         try:
             r = requests.post(f"{self.root_url}/tokenize", json=body, timeout=(self.connect_timeout, 30))
             r.raise_for_status()
@@ -156,6 +151,39 @@ class LLMClient:
         except (requests.RequestException, ValueError, AttributeError):
             return None
         return count if isinstance(count, int) and not isinstance(count, bool) else None
+
+    def count_tokens(self, text: str) -> Optional[int]:
+        """Tokens in ``text`` by the server's own tokenizer (no special tokens)."""
+        if not text:
+            return 0
+        body = {"prompt": text, "add_special_tokens": False}
+        if self.model:
+            body["model"] = self.model
+        return self._tokenize(body)
+
+    def count_chat_tokens(self, messages: list[dict], *, thinking: Optional[str] = None) -> Optional[int]:
+        """Prompt tokens of a chat request with these messages, rendered by the server's chat template exactly
+        as :meth:`stream_chat` would send them (same thinking switch)."""
+        try:
+            model = self.resolve_model()
+        except LLMError:
+            return None
+        body = {"model": model, "messages": messages}
+        kwargs = self._template_kwargs(model, thinking)
+        if kwargs:
+            body["chat_template_kwargs"] = kwargs
+        return self._tokenize(body)
+
+    @staticmethod
+    def _template_kwargs(model: str, thinking: Optional[str]) -> Optional[dict]:
+        if thinking:
+            if thinking not in THINKING_LEVELS:
+                raise ValueError(f"thinking must be one of {THINKING_LEVELS} or None, got {thinking!r}")
+            return {('enable_thinking' if 'deepseek-v4.1' in model.lower() else 'thinking'): True,
+                    "reasoning_effort": thinking}
+        if 'deepseek-v4.1' in model.lower():
+            return {"enable_thinking": False}   # V4.1 defaults to thinking=True when this argument is omitted
+        return None
 
     # ------------------------------------------------------------- streaming
     def stream_chat(
@@ -178,17 +206,10 @@ class LLMClient:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        splitter = None
-        is_v41 = 'deepseek-v4.1' in model.lower()
-        if thinking:
-            if thinking not in THINKING_LEVELS:
-                raise ValueError(f"thinking must be one of {THINKING_LEVELS} or None, got {thinking!r}")
-            thinking_key = 'enable_thinking' if is_v41 else 'thinking'
-            payload["chat_template_kwargs"] = {thinking_key: True, "reasoning_effort": thinking}
-            splitter = ThinkSplitter()
-        elif is_v41:
-            # V4.1 defaults to thinking=True when this argument is omitted.
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        kwargs = self._template_kwargs(model, thinking)
+        if kwargs:
+            payload["chat_template_kwargs"] = kwargs
+        splitter = ThinkSplitter() if thinking else None
         if extra:
             payload.update(extra)
         try:

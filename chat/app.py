@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import streamlit as st  # noqa: E402
 import streamlit.components.v1 as components  # noqa: E402
 
-from context import build_context, estimate_tokens, token_caption, token_meta  # noqa: E402
+from context import build_context, context_gauge, estimate_tokens, reasoning_meta, token_caption  # noqa: E402
 from llm_client import THINKING_LEVELS, LLMError  # noqa: E402
 from request_queue import QueueFull, QueueTimeout, UserBusy  # noqa: E402
 from runtime import get_client, get_logger, get_monitor, get_queue  # noqa: E402
@@ -295,8 +295,7 @@ def handle_prompt(conv: Conversation, prompt: str, mon_slot=None) -> None:
     persist_to_browser(conv, "pre")
 
     # 2. build the context window
-    max_len = LLM.max_model_len or (S.context_token_budget + int(g["max_tokens"]) + 2048)
-    budget = min(S.context_token_budget, max_len - int(g["max_tokens"]) - 2048)
+    _, budget = context_limits(g)
     api_messages, dropped, est = build_context(conv.messages, conv.system_prompt, budget)
     if len(api_messages) == 0 or api_messages[-1]["role"] != "user":
         with st.chat_message("assistant"):
@@ -410,8 +409,8 @@ def _finish_turn(conv, record, ticket, text, reasoning, usage, finish, t_submit,
     now = time.monotonic()
     gen_s = (now - t_start) if t_start else 0.0
     ctoks = (usage or {}).get("completion_tokens")
-    if ctoks is None and text:
-        ctoks = estimate_tokens(text)
+    if ctoks is None and (text or reasoning):
+        ctoks = estimate_tokens(text) + estimate_tokens(reasoning)
     meta = {
         "queued_s": round(ticket.waited_s, 2),
         "ttft_s": round(t_first - t_start, 2) if (t_first and t_start) else None,
@@ -422,9 +421,8 @@ def _finish_turn(conv, record, ticket, text, reasoning, usage, finish, t_submit,
         "tok_s": round(ctoks / gen_s, 1) if (ctoks and gen_s > 0) else None,
         "finish_reason": finish,
     }
-    if done:                 # the status line's numbers; a stopped reply shows no status line (no /tokenize call)
-        meta.update(token_meta(usage, text, reasoning, record["context"]["est_prompt_tokens"],
-                               record["params"]["thinking"] != "off", LLM.count_tokens, LLM.max_model_len))
+    if done:                 # a stopped reply shows no status line: no /tokenize call for it
+        meta.update(reasoning_meta(reasoning, record["params"]["thinking"] != "off", LLM.count_tokens))
     status = "ok" if done else ("error" if err else "interrupted")
     msg = {"role": "assistant", "content": text, "ts": now_iso(), "status": status, "meta": meta}
     if reasoning:
@@ -438,8 +436,54 @@ def _finish_turn(conv, record, ticket, text, reasoning, usage, finish, t_submit,
     return meta
 
 
-def render_chat(conv: Conversation, mon_slot=None) -> None:
+def context_limits(g: dict) -> tuple[int, int]:
+    """(model context, estimated history budget): history beyond the budget is left out of a request."""
+    max_len = LLM.max_model_len or (S.context_token_budget + int(g["max_tokens"]) + 2048)
+    return max_len, min(S.context_token_budget, max_len - int(g["max_tokens"]) - 2048)
+
+
+def context_usage(conv: Conversation) -> dict | None:
+    """What the next question would be sent with (system prompt + the history that fits), counted by the
+    server's chat template; earlier replies' thinking is not resent. Recounted only when the conversation or
+    the settings that shape the request change."""
+    if not conv.messages:
+        return None
+    g = st.session_state.gen
+    limit, budget = context_limits(g)
+    api, dropped, est = build_context(conv.messages, conv.system_prompt, budget)
+    last = conv.messages[-1]
+    key = (conv.id, len(conv.messages), last.get("ts"), len(last.get("content") or ""), conv.system_prompt,
+           g["thinking"], len(api), dropped)
+    cached = st.session_state.get("ctx_usage")
+    if cached is None or cached["key"] != key:
+        thinking = None if g["thinking"] == "off" else g["thinking"]
+        # an empty question renders the history exactly as the next request will (thinking dropped)
+        n = LLM.count_chat_tokens(api + [{"role": "user", "content": ""}], thinking=thinking)
+        cached = {"key": key, "tokens": n if n is not None else est, "exact": n is not None, "dropped": dropped}
+        st.session_state.ctx_usage = cached
+    return dict(cached, limit=limit, reply_tokens=int(g["max_tokens"]))
+
+
+def draw_context_gauge(slot, conv: Conversation) -> None:
+    u = context_usage(conv)
+    with slot.container():
+        if u is None:
+            return
+        fraction, label, notes = context_gauge(u["tokens"], u["exact"], u["limit"], u["dropped"], u["reply_tokens"])
+        st.progress(fraction, text=label)
+        st.caption(" · ".join(f"⚠ {n}" for n in notes) or "What the model reads with your next message",
+                   help="System prompt plus the conversation so far, counted by the model's tokenizer; your next "
+                        "question and the reply add to it. Thinking from earlier replies is not sent again, so it "
+                        "does not count. When the conversation no longer fits, the oldest messages are left out; "
+                        "start a new chat to keep everything in view. The numbers under each reply are that "
+                        "reply's own input and output.")
+
+
+def render_chat(conv: Conversation, mon_slot=None):
+    """Draw the chat; returns the context gauge's slot so main() can redraw it after a reply."""
     st.title(S.app_title)
+    gauge = st.empty()
+    draw_context_gauge(gauge, conv)
     if not conv.messages:
         st.caption("Ask anything. Your conversation stays in this browser; the server keeps an anonymous "
                    "log of requests for operations.")
@@ -448,6 +492,7 @@ def render_chat(conv: Conversation, mon_slot=None) -> None:
     prompt = st.chat_input("Message the model…", key="chat_box")
     if prompt and prompt.strip():
         handle_prompt(conv, prompt.strip(), mon_slot)
+    return gauge
 
 
 # ------------------------------------------------------------------- main
@@ -461,8 +506,9 @@ def main() -> None:
     if MON is not None:
         with st.sidebar:
             mon_slot = monitor_panel()
-    render_chat(conv, mon_slot)
+    gauge = render_chat(conv, mon_slot)
     render_sidebar(conv)
+    draw_context_gauge(gauge, current_conv())      # after a reply and with this run's settings
     # Save AFTER the browser has answered the load (or once the visitor has typed
     # something) -- never before, or an empty chat would overwrite the stored one.
     if st.session_state.restored or conv.messages:

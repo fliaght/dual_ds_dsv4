@@ -25,7 +25,7 @@ _ID_RE = re.compile(r"^[0-9a-f]{8,64}$")
 ROLES = ("user", "assistant")
 STATUSES = ("ok", "interrupted", "error")
 META_KEYS = {"queued_s", "ttft_s", "gen_s", "total_s", "prompt_tokens", "completion_tokens", "tok_s", "finish_reason",
-             "context_tokens", "context_exact", "context_limit", "reasoning_tokens", "reasoning_exact"}
+             "reasoning_tokens", "reasoning_exact"}
 MAX_CONTENT_CHARS = 400_000
 
 

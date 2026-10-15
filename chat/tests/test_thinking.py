@@ -117,6 +117,23 @@ class StreamChatTests(unittest.TestCase):
         with mock.patch.object(llm_client.requests, "post", return_value=bad):
             self.assertIsNone(cli.count_tokens("x"))
 
+    def test_count_chat_tokens_renders_like_a_request(self):
+        cli = LLMClient("http://h:8000/v1", model="dealignai/DeepSeek-V4.1-Flash-UNCENSORED-EXL3-2.9bpw")
+        cli._max_model_len = 425984
+        ok = mock.Mock(status_code=200, json=lambda: {"count": 31})
+        msgs = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}, {"role": "user", "content": ""}]
+        with mock.patch.object(llm_client.requests, "post", return_value=ok) as post:
+            self.assertEqual(cli.count_chat_tokens(msgs, thinking="high"), 31)
+            sent_high = post.call_args.kwargs["json"]
+            cli.count_chat_tokens(msgs)
+            sent_off = post.call_args.kwargs["json"]
+        self.assertEqual(post.call_args.args[0], "http://h:8000/tokenize")
+        self.assertEqual(sent_high["messages"], msgs)
+        self.assertEqual(sent_high["chat_template_kwargs"], {"enable_thinking": True, "reasoning_effort": "high"})
+        self.assertEqual(sent_off["chat_template_kwargs"], {"enable_thinking": False})
+        with mock.patch.object(llm_client.requests, "post", side_effect=llm_client.requests.Timeout()):
+            self.assertIsNone(cli.count_chat_tokens(msgs))
+
     def test_bad_level_rejected(self):
         with self.assertRaises(ValueError):
             _run([], thinking="medium")
