@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bench'))
 import memory_guard
 import v41_assets
 import v41_coop_patch
+import v41_kv_audit
+import v41_kv_grouping
 import v41_load_reclaim
 import v41_validate
 
@@ -101,6 +103,31 @@ class CoopPatchTests(unittest.TestCase):
                 self.assertIn(b'enabled=True', patched)
             finally:
                 v41_coop_patch.STOCK_SHA = original
+
+
+class KvPatchTests(unittest.TestCase):
+    SOURCE = ('def _get_kv_cache_bytes_per_block(groups):\n    return 1\n\n'
+              'def update_kv_cache_capacity(vllm_config, kv_cache_config):\n    pass\n\n'
+              'def split(spec):\n    return _approximate_gcd(\n            [1],\n'
+              '            lower_bound=min_repeats_per_group,\n        )\n')
+
+    def test_audit_and_floor_patches_are_idempotent_and_refuse_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'kv_cache_utils.py'
+            path.write_text(self.SOURCE)
+            self.assertEqual(v41_kv_audit.patch(path), 'enabled')
+            self.assertEqual(v41_kv_grouping.patch(path), 'enabled')
+            patched = path.read_text()
+            compile(patched, str(path), 'exec')
+            self.assertEqual(v41_kv_audit.patch(path), 'already enabled')
+            self.assertEqual(v41_kv_grouping.patch(path), 'already enabled')
+            self.assertEqual(path.read_text(), patched)
+            self.assertIn('lower_bound=1,', patched)
+            path.write_text('def unrelated():\n    pass\n')
+            with self.assertRaisesRegex(RuntimeError, 'refusing'):
+                v41_kv_audit.patch(path)
+            with self.assertRaisesRegex(RuntimeError, 'refusing'):
+                v41_kv_grouping.patch(path)
 
 
 class GuardTests(unittest.TestCase):

@@ -91,7 +91,9 @@ def release_pinned_staging():
 
 def bounded_weights(mapped):
     """Preserve sorted order and drop each consumed tensor's list reference."""
-    reclaimer = MappedWeightReclaimer()
+    # Smaller steps flatten the load-time MemFree dip (pages copied to the GPU but not yet
+    # paged out); 2026-10-15 lows at 64 MiB reached 4,159 MiB on the head.
+    reclaimer = MappedWeightReclaimer(int(os.environ.get('DSV41_LOAD_RECLAIM_MIB', '64')) * 1024**2)
     mapped.reverse()
     try:
         while mapped:

@@ -12,7 +12,9 @@ fallback. A 512K recipe exceeded the head node's memory margin. The older V4
 Repository baseline: [VERSION](VERSION). Operational status and deferred work:
 [Docs/current.md](Docs/current.md). Follow the [V4.1 runbook](Docs/runbooks/v41.md)
 for the new deployment, UMA protection and staged validation. The status page
-records measured input lengths, throughput and memory margins.
+records measured input lengths, throughput and memory margins. Anyone sharing these
+machines should first read the machine-wide memory guide at `~/MEMORY.md` on both
+nodes (Chinese); it is kept outside this repository so other projects see it too.
 
 ## Setup and use
 

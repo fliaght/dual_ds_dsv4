@@ -13,6 +13,8 @@ for patch in patch_exl3_packed_names patch_exl3_lm_head patch_engram_secondary \
 done
 export PYTHONPATH="/opt/dsv41:${PYTHONPATH:-}"
 python3 /opt/dsv41/v41_load_reclaim.py "$SITE/models/deepseek_v4_1/nvidia/vl_model.py"
+[ "$V41_KV_AUDIT" != 1 ] || python3 /opt/dsv41/v41_kv_audit.py "$SITE/v1/core/kv_cache_utils.py"
+[ "$V41_KV_GROUP_FLOOR" != 1 ] || python3 /opt/dsv41/v41_kv_grouping.py "$SITE/v1/core/kv_cache_utils.py"
 [ "$V41_COOP_MOE" != 1 ] ||
   python3 /opt/dsv41/v41_coop_patch.py "$SITE/model_executor/layers/quantization/exl3.py" /opt/coop
 [[ "$V41_CUDAGRAPH_SIZES" =~ ^[0-9]+( [0-9]+)*$ ]] || { echo "Bad V41_CUDAGRAPH_SIZES" >&2; exit 1; }

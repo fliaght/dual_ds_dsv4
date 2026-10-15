@@ -36,5 +36,9 @@ load_cluster_config() {
     V41_MALLOC_ARENA_MAX="${V41_MALLOC_ARENA_MAX:-2}"
     V41_PROFILER_DIR="${V41_PROFILER_DIR:-}"   # maintenance only: adds /start_profile
     V41_COOP_MOE="${V41_COOP_MOE:-0}"           # 1 = cooperative MoE (scripts/v41-coop-moe.sh build)
+    V41_LOAD_RECLAIM_MIB="${V41_LOAD_RECLAIM_MIB:-16}"  # loader page-out step; caps the load-time dip
+    V41_KV_AUDIT="${V41_KV_AUDIT:-0}"           # 1 = log KV cache groups at startup (diagnostic)
+    V41_KV_GROUP_FLOOR="${V41_KV_GROUP_FLOOR:-0}"  # 1 = experimental one-layer cache groups
+    V41_NCCL_MAX_NCHANNELS="${V41_NCCL_MAX_NCHANNELS:-8}"  # decode all-reduces are ~10 KB
   fi
 }
