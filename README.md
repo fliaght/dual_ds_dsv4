@@ -3,7 +3,9 @@
 **English** | [中文](README.zh-CN.md)
 
 DeepSeek-V4 / V4.1-Flash serving and a shared chat UI for two QSFP-connected NVIDIA
-DGX Sparks, using dedicated vLLM images, TP=2 and an OpenAI-compatible API.
+DGX Sparks with TP=2 and an OpenAI-compatible API. Since 2026-10-15 the website runs on
+[TensorFold](Docs/runbooks/tensorfold.md) (exact settings: about 1.6x the decode speed and 1.9x the
+long-input prefill of the vLLM build); the dedicated vLLM images remain the fallback.
 The V4.1 EXL3 site default `v41-416k` configures **425,984 tokens** and has passed
 a real 415,014-token input; `v41-256k` (**262,144 tokens**) is the conservative
 fallback. A 512K recipe exceeded the head node's memory margin. The older V4
@@ -15,6 +17,8 @@ for the new deployment, UMA protection and staged validation. The status page
 records measured input lengths, throughput and memory margins. Anyone sharing these
 machines should first read the machine-wide memory guide at `~/MEMORY.md` on both
 nodes (Chinese); it is kept outside this repository so other projects see it too.
+The full research record (profiling, experiments, framework evaluation, precision policy and
+conclusions, in Chinese) is in [Knowledge/research](Knowledge/research/README.md).
 
 ## Setup and use
 
@@ -32,8 +36,9 @@ bash chat/run_chat.sh --daemon   # optional chat UI, port 9450
 bash scripts/04-stop.sh --rm     # stop and remove the model containers
 ```
 
-The API binds to `0.0.0.0:8000` by default. Procedures, expected results and
-limitations are in [service operations](Docs/runbooks/service.md).
+The vLLM path binds the API to `0.0.0.0:8000`; the TensorFold service listens on
+`127.0.0.1:8000` only. Procedures, expected results and limitations are in
+[service operations](Docs/runbooks/service.md) and the [TensorFold runbook](Docs/runbooks/tensorfold.md).
 
 ## Structure and documentation
 
@@ -45,7 +50,7 @@ limitations are in [service operations](Docs/runbooks/service.md).
 | `bench/` | Explicit live inference checks and benchmark clients |
 | `tests/` | Offline regression tests for shared scripts and benchmarks |
 | `Docs/current.md` | Current state, tasks, blockers and next steps |
-| `Docs/runbooks/` | [Setup](Docs/runbooks/setup.md), [service](Docs/runbooks/service.md), [chat](Docs/runbooks/chat.md), [checks](Docs/runbooks/checks.md), [TensorFold (evaluation)](Docs/runbooks/tensorfold.md) |
+| `Docs/runbooks/` | [Setup](Docs/runbooks/setup.md), [service](Docs/runbooks/service.md), [chat](Docs/runbooks/chat.md), [checks](Docs/runbooks/checks.md), [TensorFold](Docs/runbooks/tensorfold.md) |
 | `Docs/kedb/` | [Memory](Docs/kedb/memory.md), [runtime](Docs/kedb/runtime.md), [measurement](Docs/kedb/measurement.md) |
 | `Docs/playbooks/` | [Startup and network diagnosis](Docs/playbooks/startup.md) |
 | `Docs/postmortems/` | [Historical memory-pressure incident](Docs/postmortems/memory-pressure.md) |

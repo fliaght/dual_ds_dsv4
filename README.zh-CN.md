@@ -3,7 +3,9 @@
 [English](README.md) | **中文**
 
 在两台通过 QSFP 连接的 NVIDIA DGX Spark 上运行 DeepSeek-V4 / V4.1-Flash，
-使用各自的 vLLM 镜像与 TP=2，提供 OpenAI 兼容 API 和共享聊天界面。
+使用 TP=2，提供 OpenAI 兼容 API 和共享聊天界面。2026-10-15 起网站以
+[TensorFold](Docs/runbooks/tensorfold.md) 为后端（精确设置，解码约为 vLLM 版的 1.6 倍、长输入预填充约 1.9 倍），
+专用 vLLM 镜像作为回退。
 V4.1 EXL3 的站点默认配方 `v41-416k` 上限为 **425,984 tokens**，已通过
 415,014 tokens 实际输入的验证；`v41-256k`（**262,144 tokens**）是保守回退。
 512K 配方超出 head 节点的内存余量。旧 V4 的 `interactive-128k` 仍为 **131,072 tokens**；
@@ -13,6 +15,7 @@ V4.1 EXL3 的站点默认配方 `v41-416k` 上限为 **425,984 tokens**，已通
 新部署、UMA 保护与分级验证流程见 [V4.1 部署](Docs/runbooks/v41.md)。
 状态页记录实际输入长度、吞吐和内存余量。共用这两台机器前请先读
 两台机器上的 `~/MEMORY.md`（内存分配与回收说明，放在仓库外以便其他项目也能看到）。
+完整的研究记录（剖析、实验、框架评估、精度原则与结论）见[研究文件组](Knowledge/research/README.md)。
 
 ## 安装与使用
 
@@ -29,7 +32,8 @@ bash chat/run_chat.sh --daemon   # 可选聊天界面，端口 9450
 bash scripts/04-stop.sh --rm     # 停止并移除模型容器
 ```
 
-API 默认绑定 `0.0.0.0:8000`。操作步骤、成功标准及限制见[服务操作](Docs/runbooks/service.md)。
+vLLM 路径的 API 绑定 `0.0.0.0:8000`；TensorFold 服务只监听 `127.0.0.1:8000`。
+操作步骤、成功标准及限制见[服务操作](Docs/runbooks/service.md)与 [TensorFold runbook](Docs/runbooks/tensorfold.md)。
 
 ## 项目结构与文档入口
 
@@ -41,7 +45,7 @@ API 默认绑定 `0.0.0.0:8000`。操作步骤、成功标准及限制见[服务
 | `bench/` | 显式执行的在线检查与性能测试 |
 | `tests/` | 公共脚本和基准客户端的离线回归测试 |
 | `Docs/current.md` | 当前状态、任务、阻碍及下一步 |
-| `Docs/runbooks/` | [准备](Docs/runbooks/setup.md)、[服务](Docs/runbooks/service.md)、[聊天](Docs/runbooks/chat.md)、[检查](Docs/runbooks/checks.md)、[TensorFold（评估）](Docs/runbooks/tensorfold.md) |
+| `Docs/runbooks/` | [准备](Docs/runbooks/setup.md)、[服务](Docs/runbooks/service.md)、[聊天](Docs/runbooks/chat.md)、[检查](Docs/runbooks/checks.md)、[TensorFold](Docs/runbooks/tensorfold.md) |
 | `Docs/kedb/` | [内存](Docs/kedb/memory.md)、[运行时](Docs/kedb/runtime.md)、[测量](Docs/kedb/measurement.md)已知问题 |
 | `Docs/playbooks/` | [启动与网络诊断](Docs/playbooks/startup.md) |
 | `Docs/postmortems/` | [历史内存压力事件复核](Docs/postmortems/memory-pressure.md) |

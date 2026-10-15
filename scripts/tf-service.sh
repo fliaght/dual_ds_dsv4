@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # TensorFold adapter (jayleaton/deepseek-v41-tensorfold-spark, Python path): our UMA precheck and
-# memory guards around its scripts/serve.sh. Evaluation only; the vLLM service stays the default.
+# memory guards around its scripts/serve.sh. Serving path since 2026-10-15; vLLM (v41-service.sh) is the fallback.
 #
 #   bash scripts/tf-service.sh setup | start | stop | status
 #

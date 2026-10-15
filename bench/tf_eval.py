@@ -183,8 +183,11 @@ class HealthPoll(threading.Thread):
 
 
 def needle_doc(rng, tokens):
-    """~tokens of filler with one 'secret code' sentence; returns (prompt, code). Unique per call: no cache hits."""
-    words = [rng.choice(WORDS) for _ in range(int(tokens * 0.75))]
+    """~tokens of filler with one 'secret code' sentence; returns (prompt, code). Unique per call: no cache hits.
+
+    This vocabulary tokenizes at ~1.42 tokens a word on V4.1 (measured: 187,500 words -> 266,756 tokens), so a
+    target stays a few percent under the request (a 415K target must fit a 425,984 context)."""
+    words = [rng.choice(WORDS) for _ in range(int(tokens * 0.70))]
     key, code = rng.choice(WORDS) + str(rng.randint(10, 99)), str(rng.randint(100000, 999999))
     words.insert(rng.randint(len(words) // 10, len(words) - 1), f'. The secret code for {key} is {code}. ')
     return ' '.join(words) + f'\nWhat is the secret code for {key}? Reply with just the number.', code
