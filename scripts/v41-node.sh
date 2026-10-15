@@ -15,7 +15,7 @@ mkdir -p "$V41_CACHE_DIR"/{vllm,triton,tilelang}
 ENV_ARGS=()
 for v in $NCCL_ENV_VARS MODEL API_PORT HEAD_PORT NODE_RANK MAX_MODEL_LEN MAX_NUM_SEQS \
   MAX_NUM_BATCHED_TOKENS GPU_MEM_UTIL KV_CACHE_MEMORY_BYTES BLOCK_SIZE SPEC_METHOD DSPARK_TOKENS \
-  V41_CUDAGRAPH_SIZES V41_PREFIX_RETENTION_INTERVAL V41_PROFILER_DIR; do
+  V41_CUDAGRAPH_SIZES V41_PREFIX_RETENTION_INTERVAL V41_PROFILER_DIR V41_COOP_MOE; do
   ENV_ARGS+=(-e "$v=${!v}")
 done
 ENV_ARGS+=(
@@ -41,6 +41,11 @@ ENV_ARGS+=(
   -e TORCHINDUCTOR_COMPILE_THREADS=1 -e OMP_NUM_THREADS=1
 )
 [ -z "$V41_MALLOC_ARENA_MAX" ] || ENV_ARGS+=(-e "MALLOC_ARENA_MAX=$V41_MALLOC_ARENA_MAX")
+COOP_ARGS=()
+if [ "$V41_COOP_MOE" = 1 ]; then
+  test -s "$V41_CACHE_DIR/coop/cooperative_moe.so"
+  COOP_ARGS=(-v "$V41_CACHE_DIR/coop:/opt/coop:ro")
+fi
 PACKED_ARGS=()
 if [ -n "${V41_PACKED_DIR:-}" ]; then
   for layer in 1 14; do
@@ -56,4 +61,5 @@ docker run -d --name "$CONTAINER_NAME" --gpus all --network host --ipc host \
   -v "$V41_CACHE_DIR/tilelang:/root/.tilelang/cache" \
   -v "$ROOT_DIR/scripts/v41-entrypoint.sh:/v41-entrypoint.sh:ro" \
   -v "$ROOT_DIR/scripts/v41_load_reclaim.py:/opt/dsv41/v41_load_reclaim.py:ro" \
-  "${ENV_ARGS[@]}" "${PACKED_ARGS[@]}" --entrypoint bash "$DOCKER_IMAGE" /v41-entrypoint.sh
+  -v "$ROOT_DIR/scripts/v41_coop_patch.py:/opt/dsv41/v41_coop_patch.py:ro" \
+  "${ENV_ARGS[@]}" "${PACKED_ARGS[@]}" "${COOP_ARGS[@]}" --entrypoint bash "$DOCKER_IMAGE" /v41-entrypoint.sh

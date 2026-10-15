@@ -12,7 +12,7 @@ import time
 import requests
 
 
-def guards(path, peer, minimum_mib, minimum_free_mib=6144):
+def guards(path, peer, minimum_mib, minimum_free_mib=5120):
     samples = []
     if peer:
         result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
@@ -127,7 +127,11 @@ def main():
     parser.add_argument('--peer', required=True)
     parser.add_argument('--sizes', default='1024,32768,131072,210000,250000')
     parser.add_argument('--speed-repeats', type=int, default=3)
-    parser.add_argument('--admission-mib', type=int, default=10240)
+    # Request-start gate (user decision 2026-10-15): 9 GiB available / 5 GiB free.
+    parser.add_argument('--admission-mib', type=int, default=9216)
+    parser.add_argument('--admission-free-mib', type=int, default=5120)
+    parser.add_argument('--prefix-check', type=int, default=0, metavar='TOKENS',
+                        help='two-turn chat of about TOKENS; the second turn must reuse the first from cache')
     parser.add_argument('--long-speed', action='store_true',
                         help='after the ladder, decode 1024 tokens on the largest (now cached) context')
     parser.add_argument('--long-output-tokens', type=int, default=0,
@@ -136,7 +140,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     def run_case(kind, messages, max_tokens, expected=None, target=0, **extra):
-        before = guards(args.guard_state, args.peer, args.admission_mib)
+        before = guards(args.guard_state, args.peer, args.admission_mib, args.admission_free_mib)
         result = request(args.base, args.model, messages, max_tokens, **extra)
         result.update(kind=kind, time=time.time(), model=args.model, memory_before=before,
                       memory_after=guards(args.guard_state, args.peer, 8192, 4096))
@@ -154,7 +158,7 @@ def main():
         raise RuntimeError('arithmetic smoke failed')
     largest = None
     for target in [int(s) for s in args.sizes.split(',') if s]:
-        guards(args.guard_state, args.peer, args.admission_mib)
+        guards(args.guard_state, args.peer, args.admission_mib, args.admission_free_mib)
         messages, expected, count = context_prompt(args.base, args.model, target, target + 17)
         print(f'context target={target} tokenized={count}', flush=True)
         run_case('context', messages, 128, expected, target)
@@ -169,6 +173,16 @@ def main():
         messages = [{'role': 'user', 'content': f'Exercise {repeat}. Write a numbered list of 200 practical '
                      'Python programming tips, with one full sentence explaining each tip. Start immediately.'}]
         run_case('speed', messages, 1024)
+    if args.prefix_check:
+        messages, expected, count = context_prompt(args.base, args.model, args.prefix_check, args.prefix_check + 29)
+        first = run_case('prefix_turn1', messages, 64, expected, args.prefix_check)
+        follow = messages + [{'role': 'assistant', 'content': first['answer']},
+                             {'role': 'user', 'content': 'Repeat that value once more, then stop.'}]
+        second = run_case('prefix_turn2', follow, 64, expected, args.prefix_check)
+        cached = (second['usage'].get('prompt_tokens_details') or {}).get('cached_tokens') or 0
+        print(f'prefix reuse: {cached} of {count} first-turn tokens cached', flush=True)
+        if cached < 0.9 * count:
+            raise RuntimeError('multi-turn prefix was not reused from cache')
     if args.long_output_tokens:
         messages = [{'role': 'user', 'content': 'Write a long, detailed technical handbook on Python programming, '
                      'chapter by chapter. Start immediately.'}]

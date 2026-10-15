@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bench'))
 import memory_guard
 import v41_assets
+import v41_coop_patch
 import v41_load_reclaim
 import v41_validate
 
@@ -76,11 +77,38 @@ class LoadReclaimTests(unittest.TestCase):
         self.assertEqual(calls, ['sync', 'empty'])  # Synchronize before freeing pinned pages.
 
 
+class CoopPatchTests(unittest.TestCase):
+    def test_only_the_stock_overlay_is_patched_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, overlay = Path(directory) / 'coop', Path(directory) / 'exl3.py'
+            root.mkdir()
+            overlay.write_text('drifted overlay\n')
+            with self.assertRaisesRegex(RuntimeError, 'not the validated stock'):
+                v41_coop_patch.patch(overlay, root)
+            stock = b'stock overlay\n'
+            overlay.write_bytes(stock)
+            original = v41_coop_patch.STOCK_SHA
+            v41_coop_patch.STOCK_SHA = hashlib.sha256(stock).hexdigest()
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'artifact missing'):
+                    v41_coop_patch.patch(overlay, root)
+                (root / 'runtime.py').write_text('')
+                (root / 'cooperative_moe.so').write_bytes(b'')
+                self.assertEqual(v41_coop_patch.patch(overlay, root), 'enabled')
+                patched = overlay.read_bytes()
+                self.assertEqual(v41_coop_patch.patch(overlay, root), 'already enabled')
+                self.assertEqual(overlay.read_bytes(), patched)
+                self.assertIn(b'enabled=True', patched)
+            finally:
+                v41_coop_patch.STOCK_SHA = original
+
+
 class GuardTests(unittest.TestCase):
     def test_live_client_rejects_low_free_or_stale_guard(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'guard.json'
-            state = dict(reason=None, time=time.time(), available_mib=12000, free_mib=6143)
+            # Default free gate is 5 GiB (relaxed from 6 GiB by user decision on 2026-10-15).
+            state = dict(reason=None, time=time.time(), available_mib=12000, free_mib=5119)
             path.write_text(json.dumps(state))
             with self.assertRaisesRegex(RuntimeError, 'unsafe/stale'):
                 v41_validate.guards(path, None, 10240)

@@ -5,13 +5,19 @@ source "$(dirname "$0")/_lib.sh"
 [ "$N_NODES" = 2 ] || { echo 'V4.1 requires exactly two nodes' >&2; exit 1; }
 ACTION="${1:-status}"
 
+coop_digest() {  # both ranks must load the identical kernel binary
+  [ "$V41_COOP_MOE" = 1 ] || return 0
+  sha256sum "$V41_CACHE_DIR/coop/cooperative_moe.so" 2>/dev/null | cut -d' ' -f1 || echo missing
+}
+
 settings_fingerprint() {
   # Environment overrides on the head must not silently diverge from the worker.
   printf '%s\n' "$MODEL" "$MODEL_REVISION" "$ENGRAM_REVISION" "$MAX_MODEL_LEN" \
     "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" "$GPU_MEM_UTIL" \
     "$KV_CACHE_MEMORY_BYTES" "$BLOCK_SIZE" "$SPEC_METHOD" "$DSPARK_TOKENS" \
     "$V41_IO_THREADS" "$V41_CUDAGRAPH_SIZES" "$V41_PREFIX_RETENTION_INTERVAL" \
-    "$V41_EMPTY_CACHE_MEMAVAIL_GIB" "$V41_MALLOC_ARENA_MAX" "$V41_PROFILER_DIR" | sha256sum
+    "$V41_EMPTY_CACHE_MEMAVAIL_GIB" "$V41_MALLOC_ARENA_MAX" "$V41_PROFILER_DIR" "$V41_COOP_MOE" \
+    "$(coop_digest)" | sha256sum
 }
 
 local_precheck() {

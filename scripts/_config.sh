@@ -29,10 +29,12 @@ load_cluster_config() {
   source "$RECIPE_FILE"
   if [ "$RUNTIME" = v41 ]; then
     # V4.1 runtime knobs; cluster.conf may override. Both ranks must agree (v41-service.sh).
-    V41_CUDAGRAPH_SIZES="${V41_CUDAGRAPH_SIZES:-1 2 3 4 6 8 12 18 24}"
-    V41_PREFIX_RETENTION_INTERVAL="${V41_PREFIX_RETENTION_INTERVAL:-0}"
-    V41_EMPTY_CACHE_MEMAVAIL_GIB="${V41_EMPTY_CACHE_MEMAVAIL_GIB:-12}"
-    V41_MALLOC_ARENA_MAX="${V41_MALLOC_ARENA_MAX:-}"
+    # Batch-1 decode only replays size 1; the old 9-size set cost ~0.57 GiB per rank.
+    V41_CUDAGRAPH_SIZES="${V41_CUDAGRAPH_SIZES:-1}"
+    V41_PREFIX_RETENTION_INTERVAL="${V41_PREFIX_RETENTION_INTERVAL:-4096}"
+    V41_EMPTY_CACHE_MEMAVAIL_GIB="${V41_EMPTY_CACHE_MEMAVAIL_GIB:-10}"
+    V41_MALLOC_ARENA_MAX="${V41_MALLOC_ARENA_MAX:-2}"
     V41_PROFILER_DIR="${V41_PROFILER_DIR:-}"   # maintenance only: adds /start_profile
+    V41_COOP_MOE="${V41_COOP_MOE:-0}"           # 1 = cooperative MoE (scripts/v41-coop-moe.sh build)
   fi
 }

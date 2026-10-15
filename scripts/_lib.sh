@@ -85,6 +85,7 @@ push_node() {
     scp -q "$ROOT_DIR/scripts/v41-service.sh" "$ROOT_DIR/scripts/v41-node.sh" \
       "$ROOT_DIR/scripts/v41-entrypoint.sh" "$ROOT_DIR/scripts/v41_assets.py" \
       "$ROOT_DIR/scripts/memory_guard.py" "$ROOT_DIR/scripts/v41_load_reclaim.py" \
+      "$ROOT_DIR/scripts/v41_coop_patch.py" \
       "$node:$REMOTE_STAGE/scripts/"
   fi
 }
