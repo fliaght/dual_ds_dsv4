@@ -84,5 +84,58 @@ class BenchmarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(result["wall_s"], 1)
 
 
+
+class TfEvalTests(unittest.TestCase):
+    """bench/tf_eval.py offline: opt-in, needle prompts and the admission gate; no server, no SSH."""
+
+    def setUp(self):
+        import tf_eval
+        self.tf_eval = tf_eval
+
+    def test_refuses_without_live_opt_in(self):
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"CHAT_LIVE_TESTS": ""}):
+            with self.assertRaises(SystemExit) as ctx:
+                self.tf_eval.main(["web", "--peer", "x", "--guard-state", "/nonexistent", "--out", "/nonexistent"])
+        self.assertIn("CHAT_LIVE_TESTS=1", str(ctx.exception))
+
+    def test_needle_prompt_is_unique_and_answerable(self):
+        import random
+        rng = random.Random(1)
+        first, code = self.tf_eval.needle_doc(rng, 2000)
+        second, _ = self.tf_eval.needle_doc(rng, 2000)
+        self.assertIn(f"is {code}.", first)
+        self.assertTrue(first.endswith("Reply with just the number."))
+        self.assertNotEqual(first, second)
+
+    def test_health_accepts_vllm_empty_body(self):
+        import types
+        from unittest import mock
+        run = self.tf_eval.Run.__new__(self.tf_eval.Run)
+        run.a = types.SimpleNamespace(base="http://127.0.0.1:9")
+        empty = mock.Mock(status_code=200, raise_for_status=mock.Mock(), json=mock.Mock(side_effect=ValueError))
+        tf = mock.Mock(status_code=200, raise_for_status=mock.Mock(), json=mock.Mock(return_value={"inflight": 0}))
+        with mock.patch.object(self.tf_eval.requests, "get", side_effect=[empty, tf]):
+            self.assertEqual(run.health(), {})
+            self.assertEqual(run.health(), {"inflight": 0})
+
+    def test_admission_waits_for_both_nodes_then_gives_up(self):
+        import types
+        from unittest import mock
+        run = self.tf_eval.Run.__new__(self.tf_eval.Run)
+        run.a = types.SimpleNamespace(admission_mib=9216, admission_free_mib=5120)
+        low = [{"available_mib": 20000, "free_mib": 9000}, {"available_mib": 20000, "free_mib": 5000}]
+        ok = [{"available_mib": 20000, "free_mib": 9000}, {"available_mib": 9216, "free_mib": 5120}]
+        run.guards = mock.Mock(side_effect=[low, ok])
+        with mock.patch.object(self.tf_eval.time, "sleep"):
+            self.assertEqual(run.admit(), [[20000, 9000], [9216, 5120]])
+        run.guards = mock.Mock(return_value=low)
+        with mock.patch.object(self.tf_eval.time, "sleep"), \
+                mock.patch.object(self.tf_eval.time, "time", side_effect=[0, 1000]):
+            with self.assertRaises(SystemExit):
+                run.admit(wait_s=180)
+
+
 if __name__ == "__main__":
     unittest.main()

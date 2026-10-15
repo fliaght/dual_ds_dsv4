@@ -1,0 +1,17 @@
+Files in this directory modify or configure third-party Apache-2.0 projects:
+
+deepseek-v41-tensorfold-spark
+  https://github.com/jayleaton/deepseek-v41-tensorfold-spark
+  Copyright 2026 Jay Leaton. Apache License 2.0. Pinned at 2dcce0303451da2a59f80e6c7413da8b3b0f7a57.
+  recipe.patch changes docker/Dockerfile (base image pinned by digest; pip --no-build-isolation) and
+  scripts/serve.sh (forwards NCCL_* variables; per-node HEAD_IB_HCA / WORKER_IB_HCA).
+
+TensorFold
+  https://github.com/ashhart/TensorFold
+  Copyright 2026 TensorFold contributors. Apache License 2.0 from 0.6.0 (earlier code: MIT).
+  Pinned at v0.6.0 (c4646171139ee8a3c38103eaa1699dad226ec12b) as the recipe's submodule.
+  0003-roce-nic-pairing.patch changes src/tensorfold/families/glm5_next/spark/roce.py: RoCE ports pair
+  by NIC (PCIe function suffix ignored) and GLM53_TF_ROCE_GID sets a default GID index.
+
+site.env and unset.keys are configuration for the recipe's config/prod.env.example.
+Modified by the dual_ds_dsv4 project, 2026-10-15.

@@ -92,6 +92,15 @@ class StreamChatTests(unittest.TestCase):
         kinds = [(e["type"], e.get("text")) for e in events]
         self.assertEqual(kinds, [("reasoning", "plan"), ("content", "done"), ("finish", None)])
 
+    def test_in_stream_error_is_raised_not_swallowed(self):
+        resp = _FakeResp([{"content": "par"}])
+        resp._lines.insert(1, 'data: ' + json.dumps({"error": {"message": "memory floor: try later", "code": 503}}))
+        cli = LLMClient(model="m")
+        cli._max_model_len = 1000
+        with mock.patch.object(llm_client.requests, "post", return_value=resp):
+            with self.assertRaisesRegex(llm_client.LLMError, "memory floor"):
+                list(cli.stream_chat([{"role": "user", "content": "hi"}]))
+
     def test_bad_level_rejected(self):
         with self.assertRaises(ValueError):
             _run([], thinking="medium")

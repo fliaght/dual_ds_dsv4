@@ -199,6 +199,10 @@ class LLMClient:
                     obj = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if obj.get("error"):
+                    # In-stream refusal (e.g. TensorFold's memory admission): surface it, do not hang.
+                    err = obj["error"]
+                    raise LLMError(f"server error: {err.get('message', err) if isinstance(err, dict) else err}")
                 if obj.get("usage"):
                     yield {"type": "usage", "usage": obj["usage"]}
                 for ch in obj.get("choices") or []:

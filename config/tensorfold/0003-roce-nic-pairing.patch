@@ -1,0 +1,44 @@
+Subject: [PATCH] roce: pair ports by NIC and accept a default GID index (IPv6-only links)
+
+Local patch for the dual_ds_dsv4 site (Apache-2.0, same as TensorFold).
+
+--- a/src/tensorfold/families/glm5_next/spark/roce.py
++++ b/src/tensorfold/families/glm5_next/spark/roce.py
+@@ -98,6 +98,7 @@
+ import fcntl
+ import json
+ import os
++import re
+ import socket
+ import struct
+ import sys
+@@ -251,10 +252,11 @@
+     netdev: str | None = None
+ 
+     def key(self) -> tuple:
+-        """What pairs this port with a peer's: its IPv4 subnet (else its name)."""
++        """What pairs this port with a peer's: its IPv4 subnet (else its NIC: the name without the PCIe
++        function suffix, so a back-to-back cable from f1 on one node to f0 on the other still pairs)."""
+ 
+         if self.ipv4 is None:
+-            return ("name", self.name)
++            return ("nic", re.sub(r"f\d+$", "", self.name))
+         ip = int.from_bytes(socket.inet_aton(self.ipv4), "big")
+         mask = (0xFFFFFFFF << (32 - self.prefix)) & 0xFFFFFFFF
+         return ("net", ip & mask, self.prefix)
+@@ -308,9 +310,14 @@
+     it). ``spec`` (``GLM53_TF_ROCE_HCA``) restricts to the named devices, in its order."""
+ 
+     wanted = parse_hca_spec(spec)
++    # GLM53_TF_ROCE_GID: GID index for every auto-detected port (e.g. 0 = link-local RoCE v1 on IPv6-only links).
++    default_gid = os.environ.get("GLM53_TF_ROCE_GID")
++    default_gid = int(default_gid) if default_gid not in (None, "") else None
+     base = Path(root or SYSFS)
+     names = [n for n, _ in wanted] if wanted else sorted(p.name for p in base.iterdir()) if base.is_dir() else []
+-    forced = dict(wanted)
++    forced = {n: g for n, g in wanted}
++    if default_gid is not None:
++        forced = {n: (default_gid if forced.get(n) is None else forced[n]) for n in names}
+     out = []
+     for name in names:
+         port = base / name / "ports" / "1"

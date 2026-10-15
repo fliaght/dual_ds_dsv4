@@ -1,0 +1,75 @@
+diff --git a/docker/Dockerfile b/docker/Dockerfile
+index c50dd0a..6765583 100644
+--- a/docker/Dockerfile
++++ b/docker/Dockerfile
+@@ -7,7 +7,7 @@
+ # The production measurements in README.md ran an image of this content: the same base, xgrammar 0.2.8,
+ # transformers 5.17.0, and the engine tree these patches produce (engine commit 7bd2d67 in the development history,
+ # plus a packaging-only fix; G19's rows ran 7bd2d67; older rows name their commit).
+-FROM nvcr.io/nvidia/pytorch:26.07-py3
++FROM nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
+ 
+ ENV PIP_NO_CACHE_DIR=1 \
+     PYTHONUNBUFFERED=1 \
+@@ -50,7 +50,7 @@ RUN cd /src/TensorFold \
+  && rm -rf .git \
+  && if [ "$PATCHES" != none ]; then for p in $(ls /src/patches/*.patch | sort); do \
+       echo "applying $p"; git apply --whitespace=nowarn "$p" || patch -p1 --forward < "$p" || exit 1; done; fi \
+- && pip install --no-deps /src/TensorFold \
++ && pip install --no-deps --no-build-isolation /src/TensorFold \
+  && pip install "huggingface-hub>=0.24" "tokenizers>=0.20" "safetensors>=0.4" "jinja2>=3.1" \
+  && python -c "import tensorfold.families.deepseek_v41 as f, torch, triton, pathlib; \
+ d = pathlib.Path(f.__file__).parent / 'cuda'; \
+diff --git a/scripts/serve.sh b/scripts/serve.sh
+index 064399a..df0c6f6 100755
+--- a/scripts/serve.sh
++++ b/scripts/serve.sh
+@@ -24,13 +24,13 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
+ CONFIG="${CONFIG:-config/prod.env}"
+ [[ -f "$CONFIG" ]] || { echo "[dsv41-tf] no config file $CONFIG (cp config/prod.env.example config/prod.env and fill it in)" >&2; exit 2; }
+ export CONFIG
+-caller_env=$(env | grep -E '^(CONTEXT|PARALLEL|IMAGE|PORT|HOST|NAME|SERVED_NAME|ALIASES|MAX_TOKENS|KV_DTYPE|MASTER_PORT|CANARY|DROP_CACHES|MEM_GATE_[A-Z]+|READY_TIMEOUT|PREFLIGHT|HEAD_STATE|WORKER_STATE|HEAD_PREPARED|WORKER_PREPARED|CACHE_VOL|STATE_DIR|LOG_MAX_[A-Z]+|WATCH_[A-Z_]+|OUT|TF_DSV41_[A-Z0-9_]+|GLM53_TF_[A-Z0-9_]+|(MI)?MALLOC_[A-Z_]+)=.' || true)
++caller_env=$(env | grep -E '^(CONTEXT|PARALLEL|IMAGE|PORT|HOST|NAME|SERVED_NAME|ALIASES|MAX_TOKENS|KV_DTYPE|MASTER_PORT|CANARY|DROP_CACHES|MEM_GATE_[A-Z]+|READY_TIMEOUT|PREFLIGHT|HEAD_STATE|WORKER_STATE|HEAD_PREPARED|WORKER_PREPARED|CACHE_VOL|STATE_DIR|LOG_MAX_[A-Z]+|WATCH_[A-Z_]+|OUT|TF_DSV41_[A-Z0-9_]+|GLM53_TF_[A-Z0-9_]+|(MI)?MALLOC_[A-Z_]+|NCCL_[A-Z0-9_]+)=.' || true)
+ set -a
+ # shellcheck disable=SC1090
+ source "$CONFIG"
+ set +a
+ while IFS= read -r kv; do [[ -n "$kv" ]] && export "${kv?}"; done <<< "$caller_env"
+-for _k in WORKER_SSH HEAD_IP NCCL_SOCKET_IFNAME NCCL_IB_HCA HEAD_MODEL WORKER_MODEL HEAD_ENGRAM WORKER_ENGRAM \
++for _k in WORKER_SSH HEAD_IP NCCL_SOCKET_IFNAME HEAD_MODEL WORKER_MODEL HEAD_ENGRAM WORKER_ENGRAM \
+           HEAD_STATE WORKER_STATE HEAD_PREPARED WORKER_PREPARED IMAGE; do
+     if [[ -z "${!_k:-}" || "${!_k}" == *"<"*">"* ]]; then echo "[dsv41-tf] $CONFIG: set $_k" >&2; exit 2; fi
+ done
+@@ -57,8 +57,9 @@ on_node() { local n=$1; shift; if [[ "$n" == head ]]; then bash -c "$*"; else ws
+ 
+ container_args() { # $1 = rank: `docker run` options of that rank's container (no image, no command)
+     local rank=$1 model engram prep state a
+-    if [[ "$rank" == 0 ]]; then model=$HEAD_MODEL engram=$HEAD_ENGRAM prep=$HEAD_PREPARED state=$HEAD_STATE
+-    else model=$WORKER_MODEL engram=$WORKER_ENGRAM prep=$WORKER_PREPARED state=$WORKER_STATE; fi
++    local hca
++    if [[ "$rank" == 0 ]]; then model=$HEAD_MODEL engram=$HEAD_ENGRAM prep=$HEAD_PREPARED state=$HEAD_STATE hca=${HEAD_IB_HCA:-}
++    else model=$WORKER_MODEL engram=$WORKER_ENGRAM prep=$WORKER_PREPARED state=$WORKER_STATE hca=${WORKER_IB_HCA:-}; fi
+     a="--gpus all --ipc=host --network host --device /dev/infiniband --ulimit memlock=-1"
+     a+=" --cap-add IPC_LOCK --log-opt max-size=$LOG_MAX_SIZE --log-opt max-file=$LOG_MAX_FILE"
+     a+=" -v $model:/model:ro -v $engram:/engram:ro -v $prep:/prepared"
+@@ -66,8 +67,8 @@ container_args() { # $1 = rank: `docker run` options of that rank's container (n
+     a+=" -e TORCH_EXTENSIONS_DIR=/cache/torch_extensions -e TRITON_CACHE_DIR=/cache/triton"
+     a+=" -e CUDA_CACHE_PATH=/cache/nv/ComputeCache -e TF_DSV41_IMAGE_ID=${IMAGE_ID:-$IMAGE}"
+     a+=" -e TF_DSV41_LAUNCH_T0=$(date +%s.%N)"
+-    a+=" $(env | grep -E '^(TF_DSV41_[A-Z0-9_]+|GLM53_TF_[A-Z0-9_]+|(MI)?MALLOC_[A-Z_]+)=' | grep -vE '^TF_DSV41_(LAUNCH_T0|IMAGE_ID)=' | sort | sed 's/^/-e /' | tr '\n' ' ')"
+-    a+=" -e NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME -e NCCL_IB_HCA=$NCCL_IB_HCA -e GLOO_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME"
++    a+=" $(env | grep -E '^(TF_DSV41_[A-Z0-9_]+|GLM53_TF_[A-Z0-9_]+|(MI)?MALLOC_[A-Z_]+|NCCL_[A-Z0-9_]+)=' | grep -vE '^(TF_DSV41_(LAUNCH_T0|IMAGE_ID)|NCCL_SOCKET_IFNAME|NCCL_IB_HCA)=' | sort | sed 's/^/-e /' | tr '\n' ' ')"
++    a+=" -e NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME -e GLOO_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME${hca:+ -e NCCL_IB_HCA=$hca}"
+     echo "$a"
+ }
+ 
+@@ -169,7 +170,8 @@ preflight() { # read-only checks of both nodes; non-zero on a problem. $1 = stat
+         done
+         on_node "$node" "ls -d '$prep'/*/*/rank$rank >/dev/null 2>&1" \
+             || log "preflight: warning: no prepared rank$rank folder under $prep on the $node (the first start writes ~95 GB, slow)"
+-        for f in ${NCCL_IB_HCA//,/ }; do
++        local hcas; if [[ "$node" == head ]]; then hcas=${HEAD_IB_HCA:-}; else hcas=${WORKER_IB_HCA:-}; fi
++        for f in ${hcas//,/ }; do
+             local st; st=$(on_node "$node" "cat /sys/class/infiniband/$f/ports/1/state" 2>/dev/null || echo "")
+             [[ "$st" == *ACTIVE* ]] || { log "preflight: $f port 1 on the $node is '${st:-unreadable}'"; bad=1; }
+         done

@@ -25,20 +25,25 @@ PROMPTS = (
 )
 
 
-def run(base, model, max_tokens):
+def run(base, model, max_tokens, token_ids_only=False):
     results = []
     for prompt in PROMPTS:
         payload = {'model': model, 'messages': [{'role': 'user', 'content': prompt}],
-                   'max_tokens': max_tokens, 'temperature': 0, 'logprobs': True, 'top_logprobs': 5,
-                   'return_tokens_as_token_ids': True,
+                   'max_tokens': max_tokens, 'temperature': 0,
+                   **({'return_token_ids': True} if token_ids_only else
+                      {'logprobs': True, 'top_logprobs': 5, 'return_tokens_as_token_ids': True}),
                    'chat_template_kwargs': {'enable_thinking': False}}
         started = time.perf_counter()
         response = requests.post(base + '/v1/chat/completions', json=payload, timeout=(15, 1800))
         response.raise_for_status()
         body = response.json()
-        steps = [{'id': int(e['token'].split(':')[1]), 'logprob': e['logprob'],
-                  'top': [[int(t['token'].split(':')[1]), t['logprob']] for t in e['top_logprobs']]}
-                 for e in body['choices'][0]['logprobs']['content']]
+        if token_ids_only:  # TensorFold: no logprobs; ids under its own extension field
+            ids = (body.get('tensorfold') or {}).get('token_ids') or body['choices'][0].get('token_ids') or []
+            steps = [{'id': int(i), 'logprob': None, 'top': []} for i in ids]
+        else:
+            steps = [{'id': int(e['token'].split(':')[1]), 'logprob': e['logprob'],
+                      'top': [[int(t['token'].split(':')[1]), t['logprob']] for t in e['top_logprobs']]}
+                     for e in body['choices'][0]['logprobs']['content']]
         results.append({'prompt': prompt, 'text': body['choices'][0]['message']['content'], 'steps': steps,
                         'completion_tokens': body['usage']['completion_tokens'],
                         'elapsed_s': time.perf_counter() - started})
@@ -77,10 +82,11 @@ def diff(path_a, path_b):
         sa, sb = a['steps'], b['steps']
         i = next((k for k, (x, y) in enumerate(zip(sa, sb)) if x['id'] != y['id']), None)
         prefix = sa[:i] if i is not None else sa
-        dlp = [abs(x['logprob'] - y['logprob']) for x, y in zip(prefix, sb)]
+        dlp = [abs(x['logprob'] - y['logprob']) for x, y in zip(prefix, sb)
+               if x['logprob'] is not None and y['logprob'] is not None]
         row = {'prompt': a['prompt'][:40], 'tokens': len(sa), 'first_divergence': i,
                'mean_abs_dlogprob_before': round(sum(dlp) / max(len(dlp), 1), 5)}
-        if i is not None:
+        if i is not None and sa[i]['top']:
             top = sa[i]['top']
             row['margin_top1_top2_in_A'] = round(top[0][1] - top[1][1], 4)
             row['B_choice_rank_in_A'] = next((r + 1 for r, (t, _) in enumerate(top) if t == sb[i]['id']), None)
@@ -99,6 +105,7 @@ def main():
     parser.add_argument('--max-tokens', type=int, default=256)
     parser.add_argument('--ref')
     parser.add_argument('--out')
+    parser.add_argument('--token-ids-only', action='store_true', help='servers without logprobs (TensorFold)')
     args = parser.parse_args()
     if args.action == 'agree':
         with open(args.ref) as stream:
@@ -107,7 +114,7 @@ def main():
                 print(json.dumps({'prompt': record['prompt'][:40], 'top1_agreement': round(hits / total, 4),
                                   'tokens': total}, ensure_ascii=False))
         return
-    results = run(args.base, args.model, args.max_tokens)
+    results = run(args.base, args.model, args.max_tokens, args.token_ids_only)
     with open(args.out, 'w') as stream:
         json.dump(results, stream, ensure_ascii=False, indent=1)
     if args.action == 'compare':

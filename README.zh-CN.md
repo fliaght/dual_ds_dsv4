@@ -41,7 +41,7 @@ API 默认绑定 `0.0.0.0:8000`。操作步骤、成功标准及限制见[服务
 | `bench/` | 显式执行的在线检查与性能测试 |
 | `tests/` | 公共脚本和基准客户端的离线回归测试 |
 | `Docs/current.md` | 当前状态、任务、阻碍及下一步 |
-| `Docs/runbooks/` | [准备](Docs/runbooks/setup.md)、[服务](Docs/runbooks/service.md)、[聊天](Docs/runbooks/chat.md)、[检查](Docs/runbooks/checks.md) |
+| `Docs/runbooks/` | [准备](Docs/runbooks/setup.md)、[服务](Docs/runbooks/service.md)、[聊天](Docs/runbooks/chat.md)、[检查](Docs/runbooks/checks.md)、[TensorFold（评估）](Docs/runbooks/tensorfold.md) |
 | `Docs/kedb/` | [内存](Docs/kedb/memory.md)、[运行时](Docs/kedb/runtime.md)、[测量](Docs/kedb/measurement.md)已知问题 |
 | `Docs/playbooks/` | [启动与网络诊断](Docs/playbooks/startup.md) |
 | `Docs/postmortems/` | [历史内存压力事件复核](Docs/postmortems/memory-pressure.md) |

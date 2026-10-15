@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local UMA guard; runs outside Docker and never relies on SSH for a kill."""
 import argparse
+import errno
 import json
 import os
 from pathlib import Path
@@ -45,11 +46,25 @@ def sample(container, reserve_mib, read_memory=available_mib, run=subprocess.run
     return available, reason
 
 
+def reclaim_cgroup(path, nbytes=4 << 30):
+    """Ask the kernel to reclaim up to nbytes from a cgroup the user owns (clean file cache first;
+    without swap nothing else is reclaimable). Linux only wakes kswapd near its ~168 MB low watermark,
+    so cache from the user's own tools (clones, builds, logs) otherwise sits until MemFree is gone.
+    EAGAIN means less was reclaimable; that is not an error."""
+    try:
+        Path(path, 'memory.reclaim').write_text(str(nbytes))
+    except OSError as exc:
+        if exc.errno != errno.EAGAIN:
+            raise
+
+
 class CacheReclaimer:
     """Slow file-cache eviction must never block the emergency sampling loop."""
-    def __init__(self, directories, release=release_shard_cache):
+    def __init__(self, directories, release=release_shard_cache, cgroups=(), reclaim=reclaim_cgroup):
         self.directories = directories
         self.release = release
+        self.cgroups = list(cgroups)
+        self.reclaim = reclaim
         self.thread = None
         self.error = None
         self.count = 0
@@ -68,6 +83,8 @@ class CacheReclaimer:
         def work():
             try:
                 self.release(self.directories)
+                for cgroup in self.cgroups:
+                    self.reclaim(cgroup)
             except Exception as exc:
                 self.error = str(exc)
 
@@ -81,14 +98,19 @@ def main():
     parser.add_argument('--reserve-mib', type=int, required=True)
     parser.add_argument('--state', type=Path, required=True)
     parser.add_argument('--peer', help='best-effort peer cleanup after the local emergency kill')
+    parser.add_argument('--peer-container',
+                        help='container name on the peer (default: --container; TensorFold names ranks -r0/-r1)')
     parser.add_argument('--cache-dir', type=Path, action='append', default=[],
                         help='owned shard directory whose clean page cache may be released')
+    parser.add_argument('--reclaim-cgroup', type=Path, action='append', default=[],
+                        help='cgroup owned by this user whose clean page cache may be reclaimed '
+                             '(e.g. /sys/fs/cgroup/user.slice/user-UID.slice/user@UID.service)')
     args = parser.parse_args()
     if args.reserve_mib < 4096:
         parser.error('reserve must be at least 4096 MiB')
     low_water = None
     free_low_water = None
-    cache = CacheReclaimer(args.cache_dir)
+    cache = CacheReclaimer(args.cache_dir, cgroups=args.reclaim_cgroup)
     args.state.parent.mkdir(parents=True, exist_ok=True)
     last_report = 0
     while True:
@@ -102,7 +124,7 @@ def main():
             # Start reclaim early, off the sampling thread. A low-memory sample
             # always goes straight to the kill path, even if eviction is slow.
             if (snapshot['MemAvailable'] >= args.reserve_mib
-                    and 4096 <= snapshot['MemFree'] < 16384 and args.cache_dir
+                    and 4096 <= snapshot['MemFree'] < 16384 and (args.cache_dir or args.reclaim_cgroup)
                     and time.monotonic() - cache.started >= 2):
                 cache.request()
             return snapshot['MemAvailable']
@@ -132,7 +154,7 @@ def main():
                 try:
                     subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
                                     '-o', 'StrictHostKeyChecking=accept-new',
-                                    args.peer, 'docker kill ' + shlex.quote(args.container)],
+                                    args.peer, 'docker kill ' + shlex.quote(args.peer_container or args.container)],
                                    timeout=5, capture_output=True, check=False)
                 except (OSError, subprocess.TimeoutExpired):
                     pass

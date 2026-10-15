@@ -102,6 +102,9 @@ case "$ACTION" in
     if is_leader; then peer="${NODE_ARR[1]}"; fi
     cache_args=(--cache-dir "$V41_MODEL_DIR" --cache-dir "$V41_ENGRAM_DIR")
     [ -z "${V41_PACKED_DIR:-}" ] || cache_args+=(--cache-dir "$V41_PACKED_DIR")
+    # Clean cache from this user's own tools (clones, builds, logs) is otherwise only reclaimed near
+    # the kernel's ~168 MB watermark; the guard asks for it back once MemFree drops below 16 GiB.
+    cache_args+=(--reclaim-cgroup "/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service")
     rm -f "$LOG_DIR/v41-guard.json"
     systemd-run --user --unit=dsv41-guard --collect -p MemoryMax=128M -p MemorySwapMax=0 \
       -p "ExecStopPost=-/usr/bin/docker kill $CONTAINER_NAME" \

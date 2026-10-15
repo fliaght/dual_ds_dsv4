@@ -175,6 +175,37 @@ print(json.dumps(reply))
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(len(self.read_calls()), 5)
 
+    def test_tf_setup_drops_lossy_keys_and_never_overwrites_env(self):
+        tf = self.root / "tf"
+        (tf / ".git").mkdir(parents=True)
+        (tf / "patches").mkdir()
+        (tf / "config").mkdir()
+        (tf / "config" / "prod.env.example").write_text(
+            'WORKER_SSH="<user>@<worker>"\nNCCL_IB_HCA=rocep1s0f1\nTF_DSV41_EXPERT_TOPP=0.85\n'
+            'TF_DSV41_EXPERT_TOPP_LIKE=1\nCONTEXT=300000\nPARALLEL=4\n')
+        with (self.root / "cluster.conf").open("a") as config:
+            config.write(f'\nNODES="192.0.2.1 192.0.2.2"\nV41_PACKED_DIR={shlex.quote(str(self.root / "packed"))}\n')
+        self.fake("ip", "print('eth0 UP 198.51.100.9/24')\n")    # neither node local: both via ssh
+        self.fake("ssh", "print('rocep1s0f0,roceP2p1s0f0,', end='')\n")
+        self.fake("git", "print('2dcce0303451da2a59f80e6c7413da8b3b0f7a57' if 'rev-parse' in sys.argv else '')\n")
+        env = dict(RECIPE="v41-416k", TF_DIR=str(tf), TF_STATE=str(self.root / "tf-state"))
+        result = self.run_shell("bash scripts/tf-service.sh setup", **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prod = tf / "config" / "prod.env"
+        effective = self.run_shell(f"set -a; source {shlex.quote(str(prod))}; set +a; env", **env).stdout
+        for line in ("CONTEXT=425984", "PARALLEL=1", "TF_DSV41_EXPERT_TOPP_LIKE=1", "WORKER_SSH=",
+                     "HEAD_IB_HCA=rocep1s0f0,roceP2p1s0f0", "TF_DSV41_PREFILL=full",
+                     "SERVED_NAME=dealignai/DeepSeek-V4.1-Flash-UNCENSORED-EXL3-2.9bpw"):
+            self.assertIn(line, effective)
+        self.assertNotIn("NCCL_IB_HCA=", effective)
+        self.assertNotIn("TF_DSV41_EXPERT_TOPP=", effective)
+        self.assertIn("@192.0.2.2", effective)
+        self.assertIn("is current", self.run_shell("bash scripts/tf-service.sh setup", **env).stdout)
+        prod.write_text(prod.read_text() + "LOCAL_EDIT=1\n")
+        self.run_shell("bash scripts/tf-service.sh setup", **env)
+        self.assertIn("LOCAL_EDIT=1", prod.read_text())               # never overwritten
+        self.assertTrue((tf / "config" / "prod.env.new").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

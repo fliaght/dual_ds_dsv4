@@ -1,0 +1,13 @@
+# Keys of the recipe's prod.env.example that `tf-service.sh setup` comments out (one per line).
+NCCL_IB_HCA                 # per node instead: HEAD_IB_HCA / WORKER_IB_HCA (recipe.patch)
+TF_DSV41_MHC_FN             # bf16 mHC changes bits; keep fp32
+TF_DSV41_EXPERT_TOPP        # lossy expert pruning
+TF_DSV41_EXPERT_MIN_K
+TF_DSV41_EXPERT_RENORM
+TF_DSV41_BIAS_VL            # vision only; images are rejected
+TF_DSV41_VISION_PREP_MB
+TF_DSV41_POOL_TOKENS        # sized for 4 slots
+TF_DSV41_SESSION_DISK       # no on-disk conversation snapshots
+TF_DSV41_SESSION_DISK_GIB
+TF_DSV41_SESSION_DISK_MIN
+TF_DSV41_REQUEST_LOG        # unsalted token-id hashes at rest

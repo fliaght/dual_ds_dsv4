@@ -130,6 +130,21 @@ class KvPatchTests(unittest.TestCase):
                 v41_kv_grouping.patch(path)
 
 
+class CgroupReclaimTests(unittest.TestCase):
+    def test_reclaim_writes_request_and_reclaimer_calls_it_after_shards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'memory.reclaim').write_text('')
+            memory_guard.reclaim_cgroup(directory, 123)
+            self.assertEqual((Path(directory) / 'memory.reclaim').read_text(), '123')
+        calls = []
+        reclaimer = memory_guard.CacheReclaimer(['shards'], release=lambda d: calls.append(('release', d)),
+                                                cgroups=['cg'], reclaim=lambda c: calls.append(('reclaim', c)))
+        reclaimer.request()
+        reclaimer.thread.join(5)
+        self.assertEqual(calls, [('release', ['shards']), ('reclaim', 'cg')])
+        self.assertIsNone(reclaimer.error)
+
+
 class GuardTests(unittest.TestCase):
     def test_live_client_rejects_low_free_or_stale_guard(self):
         with tempfile.TemporaryDirectory() as directory:

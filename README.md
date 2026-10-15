@@ -45,7 +45,7 @@ limitations are in [service operations](Docs/runbooks/service.md).
 | `bench/` | Explicit live inference checks and benchmark clients |
 | `tests/` | Offline regression tests for shared scripts and benchmarks |
 | `Docs/current.md` | Current state, tasks, blockers and next steps |
-| `Docs/runbooks/` | [Setup](Docs/runbooks/setup.md), [service](Docs/runbooks/service.md), [chat](Docs/runbooks/chat.md), [checks](Docs/runbooks/checks.md) |
+| `Docs/runbooks/` | [Setup](Docs/runbooks/setup.md), [service](Docs/runbooks/service.md), [chat](Docs/runbooks/chat.md), [checks](Docs/runbooks/checks.md), [TensorFold (evaluation)](Docs/runbooks/tensorfold.md) |
 | `Docs/kedb/` | [Memory](Docs/kedb/memory.md), [runtime](Docs/kedb/runtime.md), [measurement](Docs/kedb/measurement.md) |
 | `Docs/playbooks/` | [Startup and network diagnosis](Docs/playbooks/startup.md) |
 | `Docs/postmortems/` | [Historical memory-pressure incident](Docs/postmortems/memory-pressure.md) |
