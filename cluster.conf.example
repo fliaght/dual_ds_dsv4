@@ -3,7 +3,7 @@
 #
 #   cp cluster.conf.example cluster.conf && $EDITOR cluster.conf
 #
-# Every script sources this through scripts/_lib.sh.  cluster.conf is .gitignored
+# Shared scripts/_config.sh loads this and the selected recipe. cluster.conf is .gitignored
 # (it holds your site's IPs/paths) — cluster.conf.example is the committed template.
 
 # ─── Cluster topology ──────────────────────────────────────────────────────────
@@ -12,21 +12,26 @@
 # prints ready-to-paste NODES / IFACES / TRANSFER_PEER lines.
 #
 # Space-separated node IPs, HEAD (rank 0, serves the API) FIRST, then workers.
+# Each entry must be an IP bound to an IFACES interface on that node.  Two valid layouts:
 #
-# ⚠ CRITICAL: each entry MUST be the IP bound to a RoCE/IFACES interface — NOT the
-# machine's management/SSH IP.  A DGX Spark typically has BOTH (e.g. a 172.x mgmt
-# NIC and the 192.168.200.x RoCE NIC).  If you put management IPs here, every
-# precheck still passes but NCCL falls back to TCP socket (~10x slower decode) or
-# the cross-node rendezvous hangs.  Confirm with `ip -br addr show <IFACE>`.
-# (00-precheck.sh now enforces this — it rejects a NODES IP that isn't on IFACES.)
+#   A) Classic: the RoCE ports have IPs (e.g. 192.168.200.x / 201.x).  Put those RoCE IPs
+#      here and the RoCE netdev names in IFACES; leave NCCL_IB_GID_INDEX unset.
+#   B) RoCE ports WITHOUT IPs: put the management IPs here, the management NIC name in
+#      IFACES (e.g. enP7s7), and set NCCL_IB_GID_INDEX=0 below.  Control traffic uses the
+#      management network; tensor traffic still rides the QSFP RoCE link (~19.5 GB/s
+#      all-reduce measured), and it no longer matters which QSFP port each end uses.
+#
+# ⚠ Do NOT use management IPs with layout A settings: with no usable RoCE GID, NCCL falls
+# back to TCP sockets (~10x slower decode) or the rendezvous hangs.  00-precheck.sh checks
+# that every NODES IP is on IFACES AND that each active RoCE port has a GID NCCL can use.
 # This project is validated for exactly 2 DGX Sparks (TP=2); scripts generalise
 # to N but >2 is untested on V4-Flash.
 NODES="192.168.200.43 192.168.200.45"
 
-# Comma-separated RoCE interface names present (with the same names) on *every*
-# node.  Verify with `ibdev2netdev | awk '/Up)/{print $5}' | tr -d '()'`, or just
-# run scripts/discover.sh.  Note the UPPERCASE 'P' in the second port name:
-# `enP2p1s0f0np0` (a real case where Linux iface-name casing matters).
+# Comma-separated interface names, the SAME on every node, that carry the NODES IPs.
+# Layout A: the RoCE netdevs (verify with `ibdev2netdev | awk '/Up)/{print $5}' | tr -d '()'`,
+# or run scripts/discover.sh; note the UPPERCASE 'P' in `enP2p1s0f0np0`).
+# Layout B: the management NIC, e.g. IFACES="enP7s7".
 IFACES="enp1s0f0np0,enP2p1s0f0np0"
 
 # Optional shared SSH key path for 00-precheck to verify is readable on every
@@ -35,10 +40,15 @@ IFACES="enp1s0f0np0,enP2p1s0f0np0"
 # uses a specific shared key and you want the precheck to confirm it on both nodes.
 SSH_KEY=""
 
+# RoCE GID index for NCCL's RDMA data path (layout B only; leave unset for layout A).
+# 0 = RoCE v1 link-local GID derived from the port MAC: layer-2 only, needs no IPs.
+# NCCL_IB_GID_INDEX=0
+
 # ─── Container image ───────────────────────────────────────────────────────────
 # Community vLLM fork built for ARM64 / sm_121 (GB10) with the DeepSeek-V4-Flash
 # loader, MTP support, MLA-sparse Triton kernels, and the Marlin→DeepGEMM
-# layer-42 numerical fix.  Upstream vLLM does NOT serve V4-Flash on sm_121.
+# layer-42 numerical fix. This project pins that historical runtime; other builds
+# require their own compatibility checks.
 DOCKER_IMAGE="lmxxf/vllm-deepseek-v4-dgx-spark:marlin-fix-20260511"
 CONTAINER_NAME="vllm-dsv4-mn"
 
@@ -51,13 +61,15 @@ HF_CACHE="$HOME/.cache/huggingface"
 
 # ─── Tuning recipe ─────────────────────────────────────────────────────────────
 # Name (no path, no .env) of a file under config/recipes/.  Selects the operating
-# point.  See docs/RECIPES.md for the workload→recipe table.
-#   interactive-200k  — production default: MTP on, 131k context, OSL<=8k
-#   long-output       — MTP off, OSL<=12k, no spec-decode variance
-#   concurrent-32k    — MAX_NUM_SEQS=4, peak aggregate ~35 tok/s, OSL<=4k
+# point.  See Knowledge/recipes.md for the workload→recipe table.
+#   interactive-128k  — default: MTP on, 131072-token configured context
+#   long-output       — MTP off, 131072-token configured context
+#   concurrent-32k    — MTP off, MAX_NUM_SEQS=4, 32768-token context
+# interactive-200k remains a compatibility alias for interactive-128k.
+# Output recommendations and historical measurements: Knowledge/performance.md.
 # The `${RECIPE:-...}` form lets a one-off `RECIPE=long-output bash scripts/...`
 # override this default without editing the file.
-RECIPE="${RECIPE:-interactive-200k}"
+RECIPE="${RECIPE:-interactive-128k}"
 
 # ─── Networking / ports ────────────────────────────────────────────────────────
 # NCCL rendezvous (master) port for the cross-node `mp` executor.  Non-default
@@ -68,9 +80,9 @@ HEAD_PORT=29519
 API_PORT=8000
 
 # ─── Safety / ops ──────────────────────────────────────────────────────────────
-# OOM watchdog: free MiB below which trtllm/vllm is hard-killed cluster-wide
-# BEFORE `vm.panic_on_oom=1` reboots the box.  V4-Flash needs more headroom than
-# the TRT-LLM stack, so 4096 (not 2048).  See docs/TROUBLESHOOTING.md GOTCHA 1.
+# OOM watchdog: MemAvailable MiB below which vllm is hard-killed cluster-wide
+# as a best-effort response to memory pressure.  V4-Flash needs more headroom than
+# the TRT-LLM stack, so 4096 (not 2048).  See Docs/kedb/memory.md for polling limitations.
 WATCHDOG_THRESHOLD_MIB=4096
 
 # Where host-side logs (server stdout, watchdog, bench JSON) are written.
@@ -84,3 +96,14 @@ REMOTE_STAGE="$HOME/dual_ds_dsv4"
 # Peer address on the *201.x* subnet for 01-download-weights.sh rsync, so the
 # bulk weight transfer doesn't contend with NCCL traffic on 200.x.
 TRANSFER_PEER="192.168.201.45"
+
+# Optional V4.1 EXL3 profile (see Docs/runbooks/v41.md). Keep site paths here.
+# RECIPE="${RECIPE:-v41-256k}"
+# V41_MODEL_DIR="$HOME/models/DeepSeek-V4.1-Flash-UNCENSORED-EXL3-2.9bpw"
+# V41_ENGRAM_DIR="$HOME/models/DeepSeek-V4.1-Flash-Engram"
+# V41_CACHE_DIR="$HOME/.cache/dsv41-runtime"
+# V41_DOCKER_IMAGE="ghcr.io/miaai-lab/deepseek-v4.1-flash-exl3-2x-dgx-sparks@sha256:PIN"
+# V41_TRANSFER_PEER="[worker-link-local-ipv6%head-qsfp-interface]"
+# V41_SPEC_METHOD=none  # only enable dspark after measuring UMA headroom
+# V41_IO_THREADS=32
+# V41_PACKED_DIR="$HOME/models/DeepSeek-V4.1-Flash-Engram-packed" # run v41-service.sh pack first

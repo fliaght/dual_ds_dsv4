@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>local_store</title></head>
+<body>
+<script>
+/* Minimal bidirectional Streamlit component (no build step).
+ * Keeps the visitor's chat in THIS browser's localStorage so history never lives on the server.
+ *
+ * Python calls it with args:
+ *   action="load", store=<name>            -> reads localStorage, replies {loaded, client_id, conv}
+ *   action="save", store=<name>, conv=<obj> -> writes conv (null/empty -> removes the entry)
+ * Protocol (same as streamlit-component-lib): componentReady -> render(args) -> setComponentValue.
+ */
+(function () {
+  var PREFIX = "dsv4chat:";
+  var answered = {};
+
+  function post(type, extra) {
+    var msg = { isStreamlitMessage: true, type: type };
+    for (var k in (extra || {})) msg[k] = extra[k];
+    window.parent.postMessage(msg, "*");
+  }
+  function setValue(v) { post("streamlit:setComponentValue", { value: v, dataType: "json" }); }
+  function lsGet(k) { try { return window.localStorage.getItem(PREFIX + k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { window.localStorage.setItem(PREFIX + k, v); return true; } catch (e) { return false; } }
+  function lsDel(k) { try { window.localStorage.removeItem(PREFIX + k); } catch (e) {} }
+  function clientId() {
+    var id = lsGet("client_id");
+    if (!id) {
+      id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID().replace(/-/g, "")
+           : Array.from({ length: 32 }, function () { return Math.floor(Math.random() * 16).toString(16); }).join("");
+      lsSet("client_id", id);
+    }
+    return id;
+  }
+
+  function onRender(ev) {
+    var msg = ev.data;
+    if (!msg || msg.type !== "streamlit:render") return;
+    var args = msg.args || {};
+    var store = args.store || "conversation";
+
+    if (args.action === "load") {
+      if (!answered[store]) {              // answer once per mount; a reply triggers a rerun
+        answered[store] = true;
+        var conv = null;
+        var raw = lsGet(store);
+        if (raw) { try { conv = JSON.parse(raw); } catch (e) { conv = null; } }
+        setValue({ loaded: true, client_id: clientId(), conv: conv, chars: raw ? raw.length : 0 });
+      }
+    } else if (args.action === "save") {
+      var c = args.conv;
+      if (!c || !c.messages || c.messages.length === 0) lsDel(store);
+      else lsSet(store, JSON.stringify(c));
+    }
+    post("streamlit:setFrameHeight", { height: 0 });
+  }
+
+  window.addEventListener("message", onRender);
+  post("streamlit:componentReady", { apiVersion: 1 });
+})();
+</script>
+</body></html>

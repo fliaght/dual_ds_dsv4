@@ -2,9 +2,12 @@
 # Sourced by scripts/run-node.sh, which passes each var into the container with
 # `docker run -e`.  Single source of truth for the "conservative NCCL" knobs.
 #
-# Why each one: see docs/TROUBLESHOOTING.md GOTCHA 6.
+# Rationale and scope: see Docs/kedb/runtime.md and Knowledge/architecture.md.
 
-# --- Bind every transport to the two RoCE interfaces ($IFACES from cluster.conf) ---
+# --- Bind every *socket* transport (bootstrap, Gloo, fallback) to $IFACES from cluster.conf ---
+# That is the RoCE netdevs on a classic setup, or the management NIC when the RoCE ports carry
+# no IPs (then set NCCL_IB_GID_INDEX below).  NCCL's RDMA data path does NOT depend on this:
+# it uses every active RoCE HCA on the node regardless of IFACES.
 # Set by run-node.sh just before sourcing this file; re-exported here for clarity.
 : "${IFACES:?IFACES must be set before sourcing nccl-env.sh}"
 export NCCL_SOCKET_IFNAME="$IFACES"
@@ -34,3 +37,13 @@ export NCCL_DEBUG=INFO
 NCCL_ENV_VARS="NCCL_SOCKET_IFNAME GLOO_SOCKET_IFNAME TP_SOCKET_IFNAME UCX_NET_DEVICES \
 OMPI_MCA_btl_tcp_if_include NCCL_GIN_ENABLE NCCL_WIN_ENABLE NCCL_DMABUF_ENABLE \
 NCCL_GRAPH_REGISTER NCCL_LOCAL_REGISTER NCCL_MNNVL_ENABLE NCCL_IB_MERGE_NICS NCCL_DEBUG"
+
+# --- Which RoCE GID NCCL uses (optional; NCCL_IB_GID_INDEX in cluster.conf). ---
+# Unset  -> NCCL auto-selects, which needs an IPv4 address on each RoCE port (classic setup).
+# 0      -> RoCE v1 link-local GID derived from the port MAC: pure layer-2, works over the
+#           direct QSFP cable with NO IPs on the RoCE ports, regardless of which QSFP port
+#           each end is plugged into.  Measured 19.5 GB/s all-reduce on this pair.
+if [ -n "${NCCL_IB_GID_INDEX:-}" ]; then
+  export NCCL_IB_GID_INDEX
+  NCCL_ENV_VARS="$NCCL_ENV_VARS NCCL_IB_GID_INDEX"
+fi

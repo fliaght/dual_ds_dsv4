@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Reproduce the published performance matrix (docs/PERFORMANCE.md).
-# Run with the service up.  Single-stream sections assume the interactive-200k
+# Measure the current runtime; historical numbers need their original conditions.
+# Metric definitions and old evidence: Knowledge/performance.md.
+# Run with the service up.  Single-stream sections assume the interactive-128k
 # (MTP-on) recipe; the concurrency section needs the concurrent-32k recipe
 # (MAX_NUM_SEQS=4) — restart with RECIPE=concurrent-32k before running part C.
 
@@ -12,16 +13,16 @@ URL="http://127.0.0.1:$API_PORT/v1/chat/completions"
 OUT_DIR="$LOG_DIR/bench-$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT_DIR"
 echo "Results → $OUT_DIR  (recipe in use: $RECIPE)"
-BENCH=("python3" "$SCRIPT_DIR/bench_openai.py" --model "$MODEL" --url "$URL")
+BENCH=("${BENCH_PYTHON:-python3}" "$SCRIPT_DIR/bench_openai.py" --model "$MODEL" --url "$URL")
 
-echo "── A) Single-stream decode vs output length (ISL=128)"
+echo "── A) Single-stream request throughput vs output budget (ISL target=128)"
 "${BENCH[@]}" --isl 128 --osl 128 1024 4096 --conc 1 --n 3 \
-  --out "$OUT_DIR/A-decode-vs-osl.json"
+  --out "$OUT_DIR/A-output-budget.json"
 
 echo
 echo "── B) Single-stream vs input length (long prefill, OSL=256)"
 "${BENCH[@]}" --isl 128 4096 16384 --osl 256 --conc 1 --n 2 \
-  --out "$OUT_DIR/B-decode-vs-isl.json"
+  --out "$OUT_DIR/B-input-target.json"
 
 echo
 echo "── C) Concurrency sweep (needs RECIPE=concurrent-32k; OSL short)"

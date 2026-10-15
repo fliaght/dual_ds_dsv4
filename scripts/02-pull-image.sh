@@ -8,7 +8,7 @@ section "Image: $DOCKER_IMAGE on $N_NODES nodes"
 
 all_have_it=true
 for node in "${NODE_ARR[@]}"; do
-  if ssh_node "$node" "docker images --format '{{.Repository}}:{{.Tag}}' | grep -qx '$DOCKER_IMAGE'"; then
+  if ssh_node "$node" "docker image inspect '$DOCKER_IMAGE' >/dev/null 2>&1"; then
     echo "[$node] already present"
   else
     all_have_it=false
@@ -22,6 +22,6 @@ if $all_have_it; then
 fi
 
 echo "Pulling (~5 min for the 9 GB ARM64 image, depending on registry bandwidth)..."
-for_each_node "docker pull '$DOCKER_IMAGE' 2>&1 | tail -3"
+for_each_node "set -o pipefail; docker pull '$DOCKER_IMAGE' 2>&1 | tail -3"
 
 echo "✅ Pull complete.  Next: bash scripts/03-start-serve.sh"

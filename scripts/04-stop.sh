@@ -5,6 +5,9 @@
 #                                     drops PyTorch allocator state for a clean restart)
 
 source "$(dirname "$0")/_lib.sh"
+if [ "$RUNTIME" = v41 ]; then
+  exec bash "$ROOT_DIR/scripts/v41-service.sh" stop
+fi
 
 RM_CONTAINER=false
 [ "${1:-}" = "--rm" ] && RM_CONTAINER=true

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single-stream decode tok/s on REALISTIC prompts (a public-domain story snippet),
+# Single-stream request tok/s, INCLUDING PREFILL, on a public-domain story snippet,
 # not the degenerate "benchmark benchmark…" filler that artificially suppresses
 # MTP acceptance.  Builds prompts of ~N input tokens, asks for OSL continuation,
 # reports prompt/completion tokens, wall time, and tok/s per ISL.

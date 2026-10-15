@@ -1,4 +1,4 @@
-# Common helpers sourced by every orchestration script.  Loads cluster.conf and
+# Cluster orchestration helpers. Loads configuration via _config.sh and
 # provides for_each_node / ssh_node / is_leader / push_node / section.
 #
 # Usage:
@@ -6,15 +6,8 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-if [ ! -f "$ROOT_DIR/cluster.conf" ]; then
-  echo "ERROR: $ROOT_DIR/cluster.conf missing.  Copy from cluster.conf.example and edit." >&2
-  exit 1
-fi
-# shellcheck source=/dev/null
-source "$ROOT_DIR/cluster.conf"
+source "$(dirname "${BASH_SOURCE[0]}")/_config.sh"
+load_cluster_config
 
 # Required vars
 : "${NODES:?NODES not set in cluster.conf}"
@@ -35,10 +28,6 @@ NODE_ARR=($NODES)
 LEADER="${NODE_ARR[0]}"
 N_NODES=${#NODE_ARR[@]}
 TP_SIZE="${TP_SIZE:-$N_NODES}"
-
-# Resolve the active recipe to an absolute path.
-RECIPE_FILE="$ROOT_DIR/config/recipes/${RECIPE}.env"
-[ -f "$RECIPE_FILE" ] || { echo "ERROR: recipe '$RECIPE' -> $RECIPE_FILE not found." >&2; exit 1; }
 
 mkdir -p "$LOG_DIR"
 
@@ -80,7 +69,7 @@ for_each_node() {
 # Are we running on the leader (rank 0) node?
 is_leader() { _is_local "$LEADER"; }
 
-# Sync the files a worker needs (run-node.sh, cluster.conf, config/) into
+# Sync the launcher, its shared helpers, cluster.conf and the selected recipe into
 # $REMOTE_STAGE on a remote node, preserving repo layout so run-node.sh can
 # resolve its own ROOT_DIR there.  No-op for the local node.
 push_node() {
@@ -88,9 +77,16 @@ push_node() {
   _is_local "$node" && return 0
   ssh_node "$node" "mkdir -p '$REMOTE_STAGE/scripts' '$REMOTE_STAGE/config/recipes'"
   scp -q "$ROOT_DIR/cluster.conf"            "$node:$REMOTE_STAGE/cluster.conf"
-  scp -q "$ROOT_DIR/scripts/run-node.sh"     "$node:$REMOTE_STAGE/scripts/run-node.sh"
+  scp -q "$ROOT_DIR/scripts/run-node.sh" "$ROOT_DIR/scripts/_lib.sh" \
+    "$ROOT_DIR/scripts/_config.sh" "$node:$REMOTE_STAGE/scripts/"
   scp -q "$ROOT_DIR/config/nccl-env.sh"      "$node:$REMOTE_STAGE/config/nccl-env.sh"
   scp -q "$ROOT_DIR/config/recipes/${RECIPE}.env" "$node:$REMOTE_STAGE/config/recipes/${RECIPE}.env"
+  if [ "$RUNTIME" = v41 ]; then
+    scp -q "$ROOT_DIR/scripts/v41-service.sh" "$ROOT_DIR/scripts/v41-node.sh" \
+      "$ROOT_DIR/scripts/v41-entrypoint.sh" "$ROOT_DIR/scripts/v41_assets.py" \
+      "$ROOT_DIR/scripts/memory_guard.py" "$ROOT_DIR/scripts/v41_load_reclaim.py" \
+      "$node:$REMOTE_STAGE/scripts/"
+  fi
 }
 
 section() { echo; echo "═══ $* ═══"; }

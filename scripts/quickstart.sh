@@ -12,6 +12,8 @@
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_config.sh"
+load_cluster_config
 
 for s in 00-precheck.sh 02-pull-image.sh 03-start-serve.sh; do
   echo
@@ -19,7 +21,6 @@ for s in 00-precheck.sh 02-pull-image.sh 03-start-serve.sh; do
   bash "$SCRIPT_DIR/$s"
 done
 
-PORT=$(grep -E '^API_PORT=' "$SCRIPT_DIR/../cluster.conf" | cut -d= -f2)
 echo
-echo "🎉 Service up at http://127.0.0.1:${PORT}"
+echo "🎉 Service up at http://127.0.0.1:${API_PORT}"
 echo "Next: bash $SCRIPT_DIR/../bench/smoke.sh"

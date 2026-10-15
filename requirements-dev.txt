@@ -1,0 +1,4 @@
+# Offline project checks (no GPU/runtime dependencies).
+-r chat/requirements.txt
+-r bench/requirements.txt
+pyflakes>=3.2

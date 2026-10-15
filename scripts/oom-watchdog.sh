@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
-# Defeat vm.panic_on_oom=1 by hard-killing vllm cluster-wide BEFORE free memory
-# hits the floor.  DGX Spark uses unified memory (121 GiB CPU+GPU shared); an OOM
-# there triggers a kernel panic that reboots the node within ~50 ms — no userland
-# log, and because both ranks do collective ops, one node's panic wedges the
-# other.  Losing both nodes costs a ~5 min cold start, so we pre-empt.
-#
-# Auto-started by 03-start-serve.sh.  Run standalone in a spare terminal too if
-# you like.  Polls every $SLEEP_S; trips below $WATCHDOG_THRESHOLD_MIB on any node.
+# Best-effort cluster memory watcher. Polls MemAvailable, not MemFree.
+# This is not an allocation limit: polling/SSH can miss fast UMA peaks.
+# See Docs/kedb/memory.md. Auto-started by 03-start-serve.sh.
 
 source "$(dirname "$0")/_lib.sh"
 
@@ -24,7 +19,7 @@ while true; do
 
   NOW=$(date +%s)
   if [ $(( NOW - LAST_REPORT )) -ge 30 ]; then
-    line="$(date +%T) free MiB:"
+    line="$(date +%T) available MiB:"
     for node in "${NODE_ARR[@]}"; do line+=" ${node##*.}=${FREE[$node]}"; done
     echo "$line"
     LAST_REPORT=$NOW
@@ -33,7 +28,7 @@ while true; do
   for node in "${NODE_ARR[@]}"; do
     v="${FREE[$node]}"
     if [ "$v" != "?" ] && [ "$v" -lt "$THRESH" ] 2>/dev/null; then
-      echo "$(date +%T) !!! WATCHDOG TRIPPED on $node: free=${v}MiB < ${THRESH}MiB — killing vllm cluster-wide"
+      echo "$(date +%T) !!! WATCHDOG TRIPPED on $node: available=${v}MiB < ${THRESH}MiB — killing vllm cluster-wide"
       for n in "${NODE_ARR[@]}"; do
         ssh_node "$n" "docker exec '$CONTAINER_NAME' pkill -9 -f vllm 2>/dev/null" >/dev/null 2>&1 || true
       done

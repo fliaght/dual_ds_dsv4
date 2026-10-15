@@ -12,6 +12,9 @@
 #   - NCCL transport verified to be RDMA (via NET/IB), not socket fallback
 
 source "$(dirname "$0")/_lib.sh"
+if [ "$RUNTIME" = v41 ]; then
+  exec bash "$ROOT_DIR/scripts/v41-service.sh" start
+fi
 
 if ! is_leader; then
   echo "ERROR: run this from the HEAD node ($LEADER); this host isn't it." >&2
@@ -33,7 +36,7 @@ for_each_node "docker rm -f '$CONTAINER_NAME' 2>&1 | tail -1 || true"
 TS=$(date +%Y%m%d_%H%M%S)
 WATCHDOG_LOG="$LOG_DIR/watchdog-${TS}.log"
 pkill -f "scripts/oom-watchdog.sh" 2>/dev/null || true
-nohup bash "$SCRIPT_DIR/oom-watchdog.sh" > "$WATCHDOG_LOG" 2>&1 &
+nohup bash "$ROOT_DIR/scripts/oom-watchdog.sh" > "$WATCHDOG_LOG" 2>&1 &
 echo "Watchdog started → $WATCHDOG_LOG (kills vllm if free MiB < $WATCHDOG_THRESHOLD_MIB)"
 
 section "Boot WORKERS first (ranks $((N_NODES-1))..1)"
@@ -44,7 +47,7 @@ for (( rank=N_NODES-1; rank>=1; rank-- )); do
 done
 
 section "Boot HEAD (rank 0) locally"
-NODE_RANK=0 RECIPE="$RECIPE" bash "$SCRIPT_DIR/run-node.sh"
+NODE_RANK=0 RECIPE="$RECIPE" bash "$ROOT_DIR/scripts/run-node.sh"
 
 section "Waiting for API on :$API_PORT (cold start ~5-6 min)"
 deadline=$(( $(date +%s) + 600 ))
@@ -83,7 +86,7 @@ else
 fi
 
 section "Pre-warm (kills first-request JIT/autotune spikes; best-effort)"
-python3 "$SCRIPT_DIR/prewarm.py" --url "http://127.0.0.1:$API_PORT/v1/chat/completions" --model "$MODEL" \
+python3 "$ROOT_DIR/scripts/prewarm.py" --url "http://127.0.0.1:$API_PORT/v1/chat/completions" --model "$MODEL" \
   || echo "  (prewarm skipped/failed — service is still up)"
 
 echo

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch the vLLM container for ONE node (one TP rank).  Driven by NODE_RANK.
-# Self-contained: needs only cluster.conf + config/ alongside it, so it runs
+# Needs scripts/_lib.sh + _config.sh, cluster.conf and config/, so it runs
 # identically on the local head and on a worker synced into $REMOTE_STAGE.
 #
 #   NODE_RANK=1 bash run-node.sh    # worker  (boot FIRST)
@@ -13,23 +13,20 @@ set -euo pipefail
 
 NODE_RANK="${NODE_RANK:?must set NODE_RANK=0 (head) or 1 (worker)}"
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=/dev/null
-source "$ROOT_DIR/cluster.conf"
-
-# shellcheck disable=SC2206
-NODE_ARR=($NODES)
-N_NODES=${#NODE_ARR[@]}
-TP_SIZE="${TP_SIZE:-$N_NODES}"
-HEAD_IP="${NODE_ARR[0]}"
+source "$(dirname "$0")/_lib.sh"
+if [ "$RUNTIME" = v41 ]; then
+  export NODE_RANK
+  exec bash "$ROOT_DIR/scripts/v41-node.sh"
+fi
+if [ "$(docker inspect vllm-dsv41-exl3 --format '{{.State.Running}}' 2>/dev/null || true)" = true ]; then
+  echo 'V4.1 is running. Stop it before starting V4 on shared UMA.' >&2
+  exit 1
+fi
+HEAD_IP="$LEADER"
 [ "$NODE_RANK" -lt "$N_NODES" ] || { echo "NODE_RANK $NODE_RANK >= N_NODES $N_NODES" >&2; exit 1; }
 VLLM_HOST_IP_VAL="${NODE_ARR[$NODE_RANK]}"
 
-# ---- recipe (tuning knobs); MODEL/IMAGE/etc come from cluster.conf ----
-RECIPE_FILE="$ROOT_DIR/config/recipes/${RECIPE}.env"
-[ -f "$RECIPE_FILE" ] || { echo "recipe not found: $RECIPE_FILE" >&2; exit 1; }
-# shellcheck source=/dev/null
-source "$RECIPE_FILE"
+# ---- recipe and site configuration loaded by _lib.sh ----
 : "${MAX_MODEL_LEN:?}" "${GPU_MEM_UTIL:?}" "${MAX_NUM_SEQS:?}" "${MAX_NUM_BATCHED_TOKENS:?}"
 : "${BLOCK_SIZE:?}" "${KV_DTYPE:?}" "${CUDAGRAPH_MODE:?}"
 
@@ -110,6 +107,7 @@ docker run -d \
       --tokenizer-mode deepseek_v4 \
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v4 \
       --compilation-config '{\"cudagraph_mode\":\"$CUDAGRAPH_MODE\"}' \
       $SPEC_INNER $HEADLESS_FLAG $HOST_FLAGS \
       2>&1 | tee /tmp/vllm.log /host_logs/vllm-dsv4-rank${NODE_RANK}.log"

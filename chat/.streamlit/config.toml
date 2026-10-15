@@ -1,0 +1,13 @@
+# Streamlit server config for the chat UI (picked up because run_chat.sh cd's here).
+[server]
+port = 9450                   # fixed UI port (run_chat.sh passes it explicitly too)
+headless = true
+enableXsrfProtection = true
+fileWatcherType = "none"      # production: no inotify polling of the source tree
+maxUploadSize = 5
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"

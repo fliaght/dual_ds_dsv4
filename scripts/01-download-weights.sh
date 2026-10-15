@@ -11,6 +11,9 @@
 # Pre-check: needs >= $NEED_GIB free where the HF cache lives.
 
 source "$(dirname "$0")/_lib.sh"
+if [ "$RUNTIME" = v41 ]; then
+  exec bash "$ROOT_DIR/scripts/v41-service.sh" download
+fi
 
 MODE="${1:-sequential}"
 NEED_GIB="${NEED_GIB:-200}"

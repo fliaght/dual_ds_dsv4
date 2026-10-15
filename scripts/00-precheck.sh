@@ -2,19 +2,21 @@
 # Pre-flight checks before any container starts.  Verifies, on every node:
 #   - SSH reachability from the head
 #   - Docker daemon reachable
-#   - All RoCE NICs in $IFACES present and Up
-#   - RoCE addressing: each IFACES NIC has an IPv4, and each NODES IP is bound to
-#     a RoCE iface (NOT a management NIC) — the load-bearing NCCL assumption
-#   - RoCE NIC names match across nodes
+#   - IFACES NICs present and up, and each NODES IP bound to one of them
+#   - RDMA data path: at least one active RoCE port, with a GID NCCL can use
+#     (an IPv4-mapped GID, or the GID at NCCL_IB_GID_INDEX if set)
 #   - NCCL master port ($HEAD_PORT) free on the head + fabric reachable
 #   - Model snapshot present under $HF_CACHE
 #   - Shared SSH key readable
-#   - Enough free UMA headroom
+#   - Report UMA headroom (informational; not a capacity admission check)
 # Exit 0 iff every check passes on every node.
 #
 # New to a pair and don't know NODES/IFACES?  Run `bash scripts/discover.sh` first.
 
 source "$(dirname "$0")/_lib.sh"
+if [ "$RUNTIME" = v41 ]; then
+  exec bash "$ROOT_DIR/scripts/v41-service.sh" precheck
+fi
 
 section "Pre-flight across $N_NODES nodes (leader=$LEADER, model=$MODEL, recipe=$RECIPE)"
 ok=true
@@ -28,54 +30,73 @@ done
 section "Docker daemon"
 for_each_node 'docker info --format "Server v{{.ServerVersion}}, {{.NCPU}} CPUs"' || ok=false
 
-section "RoCE NIC status (need: ${IFACES})"
+section "IFACES (${IFACES}) up on every node"
+# IFACES carry the NODES IPs: NCCL bootstrap, Gloo, torch rendezvous, and socket fallback.
+# Classic setup: the RoCE netdevs.  RoCE ports without IPs: the management NIC (see below).
 for node in "${NODE_ARR[@]}"; do
-  out=$(ssh_node "$node" "ibdev2netdev | awk '/Up\\)/{print \$5}' | tr -d '()'") \
-    || { echo "[$node] ibdev2netdev FAILED"; ok=false; continue; }
   for iface in ${IFACES//,/ }; do
-    if grep -qx "$iface" <<< "$out"; then echo "[$node] $iface UP"
-    else echo "[$node] $iface MISSING/DOWN — saw: $(echo "$out" | tr '\n' ' ')"; ok=false; fi
+    st=$(ssh_node "$node" "cat /sys/class/net/$iface/operstate 2>/dev/null") || st=""
+    if [ "$st" = "up" ]; then echo "[$node] $iface up"
+    else echo "[$node] ✗ $iface ${st:-missing} — every node needs the same IFACES names"; ok=false; fi
   done
 done
 
-section "RoCE addressing: each IFACES NIC has an IP, and NODES IP is on one"
-# This catches the #1 new-machine footgun: putting a management/SSH IP in NODES.
-# NCCL binds transports to the IFACES NIC NAMES (config/nccl-env.sh) while ranks
-# advertise the NODES IPs (run-node.sh VLLM_HOST_IP / --master-addr).  If a NODES
-# IP isn't on a RoCE iface, NCCL silently socket-falls-back (~10x slower) or hangs.
+section "NODES IP is bound to an IFACES NIC"
+# Ranks advertise the NODES IPs (VLLM_HOST_IP / --master-addr) while sockets bind to the IFACES
+# NIC names.  If a NODES IP isn't on an IFACES NIC, the rendezvous hangs.
 for i in "${!NODE_ARR[@]}"; do
   node="${NODE_ARR[$i]}"
   table=$(ssh_node "$node" "ip -4 -br addr show 2>/dev/null | awk '{for(j=3;j<=NF;j++) print \$1, \$j}'") \
     || { echo "[$node] ip addr FAILED"; ok=false; continue; }
-  roce_ips=""
-  for rnic in ${IFACES//,/ }; do
-    a=$(awk -v n="$rnic" '$1==n{print $2}' <<< "$table" | head -1 | cut -d/ -f1)
-    if [ -n "$a" ]; then echo "[$node] $rnic = $a"; roce_ips+=" $a"
-    else echo "[$node] ✗ $rnic has NO IPv4 (RDMA link up but unaddressed)"; ok=false; fi
-  done
   match=false
-  for a in $roce_ips; do [ "$a" = "$node" ] && match=true; done
-  if $match; then
-    echo "[$node] ✓ NODES IP $node is on a RoCE iface"
+  for nic in ${IFACES//,/ }; do
+    a=$(awk -v n="$nic" '$1==n{print $2}' <<< "$table" | head -1 | cut -d/ -f1)
+    if [ -n "$a" ]; then echo "[$node] $nic = $a"; [ "$a" = "$node" ] && match=true
+    else echo "[$node] ✗ $nic has NO IPv4"; ok=false; fi
+  done
+  if $match; then echo "[$node] ✓ NODES IP $node is on IFACES"
   else
     onif=$(awk -v ip="$node" '$2 ~ ("^" ip "/"){print $1}' <<< "$table" | head -1)
-    echo "[$node] ✗ NODES IP $node is NOT on a RoCE iface — found on '${onif:-<not on this node>}'."
-    echo "          NCCL will socket-fallback (~10x slower) or hang.  Set NODES to the RoCE IP"
-    echo "          (run: bash scripts/discover.sh)."
+    echo "[$node] ✗ NODES IP $node is NOT on IFACES ($IFACES) — found on '${onif:-<not on this node>}'."
+    echo "          Set IFACES to the NIC that carries NODES (run: bash scripts/discover.sh)."
     ok=false
   fi
 done
 
-section "RoCE NIC names match across nodes"
-ref_set=""
+section "RDMA data path: active RoCE ports + usable GID (NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-auto})"
+# Tensor traffic must ride RoCE, never the socket path (~10x+ slower decode).  NCCL uses every
+# active RoCE HCA on each node; names may differ between nodes (e.g. one end in QSFP port 2).
+# With NCCL_IB_GID_INDEX unset, NCCL needs an IPv4-mapped GID (an IPv4 on the RoCE port);
+# NCCL_IB_GID_INDEX=0 uses the MAC-derived link-local GID instead (no IPs needed).
+GIDX="${NCCL_IB_GID_INDEX:-}"
+RS='for d in $(ibdev2netdev 2>/dev/null | awk "/Up\)/{print \$1}"); do
+  v4=no; for f in /sys/class/infiniband/$d/ports/1/gids/*; do grep -q "0000:0000:0000:0000:0000:ffff" $f 2>/dev/null && v4=yes; done
+  g=none; [ -n "GIDX" ] && g=$(cat /sys/class/infiniband/$d/ports/1/gids/GIDX 2>/dev/null)
+  echo "$d $v4 ${g:-none}"; done'
+RS="${RS//GIDX/$GIDX}"
+ref_count=""
 for node in "${NODE_ARR[@]}"; do
-  s=$(ssh_node "$node" "ibdev2netdev 2>/dev/null | awk '/Up\\)/{print \$5}' | tr -d '()' | sort | paste -sd, -") || s=""
-  echo "[$node] Up RoCE NICs: ${s:-<none>}"
-  if [ -z "$ref_set" ]; then ref_set="$s"
-  elif [ "$s" != "$ref_set" ]; then
-    echo "          ✗ differs from $LEADER ($ref_set) — this stack binds one IFACES list to both ranks; names must match"
-    ok=false
+  out=$(ssh_node "$node" "$RS") || out=""
+  n=$(grep -c . <<< "$out" || true)
+  if [ "$n" -eq 0 ]; then
+    echo "[$node] ✗ no active RoCE port — check the QSFP cable"; ok=false; continue
   fi
+  while read -r dev v4 gid; do
+    if [ -n "$GIDX" ]; then
+      if [ -n "$gid" ] && [ "$gid" != "none" ] && [ "$gid" != "0000:0000:0000:0000:0000:0000:0000:0000" ]; then
+        echo "[$node] $dev active, GID[$GIDX]=$gid"
+      else echo "[$node] ✗ $dev active but GID[$GIDX] is empty"; ok=false; fi
+    else
+      if [ "$v4" = yes ]; then echo "[$node] $dev active, has IPv4 GID"
+      else
+        echo "[$node] ✗ $dev active but has no IPv4 GID — NCCL auto-select will fail."
+        echo "          Either give the RoCE port an IPv4, or set NCCL_IB_GID_INDEX=0 in cluster.conf."
+        ok=false
+      fi
+    fi
+  done <<< "$out"
+  if [ -z "$ref_count" ]; then ref_count=$n
+  elif [ "$n" != "$ref_count" ]; then echo "[$node] ⚠ $n active RoCE ports vs $ref_count on $LEADER (works, but bandwidth may be uneven)"; fi
 done
 
 section "NCCL master port $HEAD_PORT free on head + fabric reachable"
@@ -86,7 +107,7 @@ else
 fi
 for node in "${NODE_ARR[@]:1}"; do
   if ssh_node "$node" "ping -c1 -W2 $LEADER >/dev/null 2>&1"; then
-    echo "[$node] reaches head $LEADER over fabric (ping OK)"
+    echo "[$node] reaches head $LEADER (ping OK)"
   else
     echo "[$node] ⚠ could not ping head $LEADER (ICMP may be blocked; if NCCL later hangs, check RoCE routing)"
   fi
