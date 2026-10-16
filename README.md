@@ -72,6 +72,10 @@ The check command runs offline validation and tests, including a local fake
 API. It does not start model containers or send model inference requests.
 Dependencies and explicit live-test commands are in the [check runbook](Docs/runbooks/checks.md).
 
-Apache-2.0: [LICENSE](LICENSE). The implementation builds on the `lmxxf` / DGX
-Spark vLLM community and local `interllm-dsv4` experiments. Historical evidence
-is retained in [ArchiveDocs](ArchiveDocs/).
+License: [PolyForm Noncommercial 1.0.0](LICENSE). Noncommercial use is free;
+commercial use needs separate permission from the author, Yi Luo. Third-party
+parts keep their own licenses: the TensorFold recipe patches in `config/tensorfold/`
+(Apache-2.0, see its `NOTICE`) and the Inter font in `chat/static/fonts/` (SIL OFL 1.1).
+Earlier versions published under Apache-2.0 remain under those terms. The
+implementation builds on the `lmxxf` / DGX Spark vLLM community and local
+`interllm-dsv4` experiments.

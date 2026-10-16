@@ -66,5 +66,7 @@ bash scripts/check.sh
 检查入口执行离线校验与测试，包含本地模拟 API；不启动模型容器或发送真实推理请求。
 依赖与在线测试入口见[检查流程](Docs/runbooks/checks.md)。
 
-许可证：[Apache-2.0](LICENSE)。现有运行时基于 `lmxxf` 等 DGX Spark vLLM
-社区实现，本地 `interllm-dsv4` 历史测试证据保留在 [ArchiveDocs](ArchiveDocs/)。
+许可证：[PolyForm Noncommercial 1.0.0](LICENSE)。非商业用途免费；商业用途须另获作者 Yi Luo 许可。
+第三方部分保留各自许可证：`config/tensorfold/` 中的 TensorFold 配方补丁（Apache-2.0，见其 `NOTICE`）、
+`chat/static/fonts/` 中的 Inter 字体（SIL OFL 1.1）。此前以 Apache-2.0 发布的版本仍适用原条款。
+现有运行时基于 `lmxxf` 等 DGX Spark vLLM 社区实现及本地 `interllm-dsv4` 实验。
