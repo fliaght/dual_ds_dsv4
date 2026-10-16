@@ -1,9 +1,10 @@
 """End-to-end through Streamlit's AppTest against the LIVE model server.
 
-AppTest executes no browser JavaScript, so the localStorage component never
+AppTest executes no browser JavaScript, so the browser store never
 answers here: these tests cover the server side (no-login chat, multi-turn
-context, audit log, queueing, busy-visitor refusal, clear).  The real-browser
-round-trip (save -> reload -> restore) is covered by tests/browser_check.py.
+context, audit log, queueing, busy-visitor refusal, new chat) with the real model.
+The same flows against a fake server are tests/test_app_offline.py; the browser
+half (IndexedDB, Copy, reloads) is tests/browser_check.py.
 
 Opt in with CHAT_LIVE_TESTS=1. Otherwise no model server is contacted, even
 when one is running. Uses a throw-away CHAT_LOG_DIR.
@@ -84,16 +85,16 @@ class E2E(unittest.TestCase):
                 self.assertIn(k, r)
             self.assertEqual(r["status"], "ok"); self.assertEqual(r["conv_id"], conv.id)
 
-    def test_clear_chat(self):
+    def test_new_chat(self):
         at = _at()
         at.chat_input[0].set_value(MATH_Q).run()
         self.assertEqual(len(at.session_state["conv"].messages), 2)
         old_id = at.session_state["conv"].id
-        at.button(key="clear_chat").click().run()
+        at.button(key="new-chat").click().run()
         self.assertFalse(at.exception, at.exception)
         self.assertEqual(at.session_state["conv"].messages, [])
         self.assertNotEqual(at.session_state["conv"].id, old_id)
-        self.assertTrue(any(e["event"] == "chat_cleared" and e["conv_id"] == old_id and e["messages"] == 2
+        self.assertTrue(any(e["event"] == "chat_new" and e["conv_id"] == at.session_state["conv"].id
                             for e in _events()))
 
     def test_second_visitor_waits_for_a_busy_slot(self):

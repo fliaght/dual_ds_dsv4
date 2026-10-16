@@ -10,6 +10,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _repo_version() -> str:
+    """``v<VERSION>`` from the repository root; run_chat.sh adds the commit via CHAT_VERSION."""
+    try:
+        return "v" + (Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def _env(name: str, default):
     v = os.environ.get(name)
     if v is None or v == "":
@@ -26,6 +34,8 @@ def _env(name: str, default):
 @dataclass(frozen=True)
 class Settings:
     app_title: str = _env("CHAT_TITLE", "DeepSeek-V4-Flash on 2× DGX Spark")
+    version: str = _env("CHAT_VERSION", _repo_version())                # bottom-left corner of the page
+    disclaimer: str = _env("CHAT_DISCLAIMER", "Large language models can make mistakes.")
     api_base: str = _env("CHAT_API_BASE", "http://127.0.0.1:8000/v1")
     model: str = _env("CHAT_MODEL", "")                       # "" -> discover via /v1/models
     log_dir: Path = Path(_env("CHAT_LOG_DIR", os.path.expanduser("~/dsv4_logs/chat")))   # server-side JSONL logs
@@ -37,7 +47,7 @@ class Settings:
     max_wait_s: float = _env("CHAT_MAX_WAIT_S", 600.0)
     per_user_limit: int = _env("CHAT_PER_USER_LIMIT", 1)
 
-    # browser-side history: newest N messages kept in localStorage (and in context)
+    # browser-side history: newest N messages of each chat kept in the browser (and in context)
     max_local_messages: int = _env("CHAT_MAX_LOCAL_MESSAGES", 400)
 
     # generation defaults / caps.  8192 is the V4 MTP recipes' OSL ceiling; run_chat.sh raises it for V4.1.

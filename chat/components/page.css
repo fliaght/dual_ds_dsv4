@@ -1,0 +1,92 @@
+/* Swiss style for the chat page: one typeface, a strict left edge, hairline rules, one red accent.
+   Colours repeat .streamlit/config.toml (the theme covers widgets; this covers layout and labels).
+   Selectors use Streamlit's data-testid names and the st-key-<key> classes of keyed containers. */
+:root {
+  --ink: #161616;
+  --muted: #6e6c66;
+  --faint: #8c8a84;
+  --rule: #dedcd5;
+  --panel: #efeeea;
+  --panel-dark: #e7e5df;
+  --red: #d52b1e;
+}
+
+html, body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+[data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] style) { display: none; }   /* this sheet */
+[data-testid="stAppHeader"] { background: transparent; }
+[data-testid="stMainBlockContainer"] { max-width: 50rem; padding-top: 4.5rem; padding-bottom: 6rem; }
+[data-testid="stMain"] p, [data-testid="stMain"] li { line-height: 1.7; }
+
+/* masthead: the title on a heavy rule */
+.st-key-masthead { border-bottom: 2px solid var(--ink); padding-bottom: 0.875rem; }
+.st-key-masthead h1 { font-size: 1.625rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; padding: 0; }
+.st-key-masthead [data-testid="stPopover"] button p { font-size: 0.8125rem; }
+
+/* context gauge: a small uppercase label over a thin bar */
+.st-key-gauge { gap: 0.25rem; }
+.st-key-gauge [data-testid="stProgress"] p {
+  font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
+}
+.st-key-gauge [data-testid="stCaptionContainer"] p { font-size: 0.75rem; }
+
+/* empty chat */
+.st-key-welcome { padding-top: 3rem; gap: 0.75rem; }
+.st-key-welcome h2 { font-size: 2.75rem; font-weight: 700; letter-spacing: -0.025em; line-height: 1.1; padding: 0; }
+
+/* messages: no avatars; a small uppercase role label; the visitor's turns on a flat panel */
+[data-testid="stChatMessage"] { background: transparent; border-radius: 0; gap: 0; padding: 1.25rem 0 0.25rem; }
+[data-testid="stChatMessageAvatarUser"], [data-testid="stChatMessageAvatarAssistant"] { display: none; }
+[data-testid="stChatMessageContent"]::before {
+  content: "Model"; display: block; margin-bottom: 0.5rem;
+  font-size: 0.6875rem; font-weight: 650; letter-spacing: 0.14em; text-transform: uppercase; color: var(--red);
+}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+  background: var(--panel); padding: 1rem 1.25rem 0.375rem; margin-top: 1.5rem;
+}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) [data-testid="stChatMessageContent"]::before {
+  content: "You"; color: var(--muted);
+}
+[data-testid="stChatMessageContent"] h1 { font-size: 1.375rem; }
+[data-testid="stChatMessageContent"] h2 { font-size: 1.1875rem; }
+[data-testid="stChatMessageContent"] h3 { font-size: 1.0625rem; }
+[data-testid="stChatMessageContent"] blockquote { border-left: 2px solid var(--ink); }
+[data-testid="stChatMessageContent"] [data-testid="stCaptionContainer"] p { font-size: 0.75rem; color: var(--faint); }
+
+/* sidebar: the chat list as a tight typographic index */
+[data-testid="stSidebarUserContent"] { padding-bottom: 3.5rem; }
+.st-key-history { gap: 0.0625rem; }
+.st-key-history-empty p { font-size: 0.8125rem; color: var(--faint); }
+.st-key-history [data-testid="stCaptionContainer"] p {
+  margin-top: 0.875rem; font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--faint);
+}
+.st-key-history button {
+  justify-content: flex-start; min-height: 0; padding: 0.3125rem 0.625rem; border-radius: 0;
+  border-left: 2px solid transparent; color: var(--ink);
+}
+.st-key-history button:hover { background: var(--panel-dark); color: var(--ink); }
+.st-key-history button > div { justify-content: flex-start; width: 100%; min-width: 0; }
+.st-key-history button [data-testid="stMarkdownContainer"] { width: 100%; min-width: 0; }
+.st-key-history button p {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; font-size: 0.875rem;
+}
+.st-key-history [class*="st-key-chat-here-"] button { border-left-color: var(--red); background: var(--panel-dark); }
+.st-key-history [class*="st-key-chat-here-"] button p { font-weight: 600; }
+[data-testid="stSidebar"] [data-testid="stExpander"] details { border: 0; border-top: 1px solid var(--rule); border-radius: 0; }
+[data-testid="stSidebar"] [data-testid="stExpander"] summary p { font-size: 0.8125rem; font-weight: 600; }
+
+/* bottom: the input, then the reminder */
+[data-testid="stBottomBlockContainer"] { max-width: 50rem; padding-bottom: 1rem; }
+[data-testid="stBottomBlockContainer"] [data-testid="stCaptionContainer"] p { font-size: 0.75rem; color: var(--faint); }
+
+/* the build, bottom-left */
+.app-version {
+  position: fixed; left: 1rem; bottom: 0.875rem; z-index: 1000010; pointer-events: none;
+  font-size: 0.6875rem; letter-spacing: 0.06em; color: var(--faint); font-variant-numeric: tabular-nums;
+}
+
+/* phones: the reminder takes the bottom line, the build sits under it */
+@media (max-width: 640px) {
+  [data-testid="stBottomBlockContainer"] { padding-bottom: 1.75rem; }
+  .app-version { bottom: 0.375rem; }
+}

@@ -1,42 +1,52 @@
-"""Streamlit chat UI for the dual-Spark DeepSeek-V4-Flash service -- no accounts.
+"""Streamlit chat UI for the dual-Spark DeepSeek service -- no accounts.
 
     bash chat/run_chat.sh --daemon   # http://<head-ip>:9450
 
 How it works, in one paragraph: every visitor lands straight in a chat.  Their
-conversation is kept in *their own browser* (localStorage, via the tiny
-``components/local_store`` component) and restored on the next visit; the
-server stores no per-user data.  A prompt joins the process-wide FIFO queue
+chats and generation settings are kept in *their own browser* (IndexedDB and
+localStorage, via ``browser.py``) and come back on the next visit; the server
+stores no per-user data.  A prompt joins the process-wide FIFO queue
 (request_queue.py) -- waiting visitors see their position -- then the reply
-streams from vLLM.  Every turn is appended to the server-side audit log
-(``$CHAT_LOG_DIR/chat-YYYY-MM-DD.jsonl``), even if the visitor hits Stop.
+streams from the model server.  Every turn is appended to the server-side audit
+log (``$CHAT_LOG_DIR/chat-YYYY-MM-DD.jsonl``), even if the visitor hits Stop.
 """
 from __future__ import annotations
 
+import html
 import importlib
 import os
+import re
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st  # noqa: E402
-import streamlit.components.v1 as components  # noqa: E402
 
+import browser  # noqa: E402
 from context import build_context, context_gauge, estimate_tokens, reasoning_meta, token_caption  # noqa: E402
+from history import (MAX_TOKENS_MIN, MAX_TOKENS_STEP, SYSTEM_PROMPT_CHARS, TEMPERATURE, TOP_P,  # noqa: E402
+                     clean_index, clean_settings, group_by_day, meta_of, upsert)
 from llm_client import THINKING_LEVELS, LLMError  # noqa: E402
 from request_queue import QueueFull, QueueTimeout, UserBusy  # noqa: E402
 from runtime import get_client, get_logger, get_monitor, get_queue  # noqa: E402
 from settings import Settings, load_settings  # noqa: E402
-from storage import Conversation, clean_id, now_iso  # noqa: E402
+from storage import MAX_CONTENT_CHARS, Conversation, clean_id, now_iso  # noqa: E402
 
 S: Settings = load_settings()
 
 THINKING_OPTIONS = ("off", *THINKING_LEVELS)
 THINKING_LABELS = {"off": "Off", "high": "High", "max": "Max"}
 DEFAULT_THINKING = S.default_thinking if S.default_thinking in THINKING_OPTIONS else "off"
+DEFAULTS = {"thinking": DEFAULT_THINKING, "max_tokens": S.default_max_tokens, "temperature": S.default_temperature,
+            "top_p": S.default_top_p, "system_prompt": S.system_prompt}
+SETTING_KEYS = {name: f"set_{name}" for name in DEFAULTS}       # the settings widgets' session-state keys
+HISTORY_PAGE = 40
 
-st.set_page_config(page_title=S.app_title, page_icon="💬", layout="wide")
+st.set_page_config(page_title=S.app_title, page_icon="🟥", layout="centered")
 
 # One queue / logger / client per server process, shared by all sessions (runtime.py).
 Q = get_queue(S)
@@ -44,10 +54,9 @@ LOG = get_logger(S)
 LLM = get_client(S)
 MON = get_monitor(S) if S.monitor_enabled else None
 
-# Bidirectional component that reads/writes the chat in the browser's localStorage.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-local_store = components.declare_component("dsv4_local_store", path=os.path.join(_HERE, "components", "local_store"))
-STORE = "conversation"
+with open(os.path.join(_HERE, "components", "page.css"), encoding="utf-8") as _f:
+    PAGE_CSS = _f.read()
 
 
 # ------------------------------------------------------------ session state
@@ -56,12 +65,32 @@ def ss_init() -> None:
     if "session_id" in ss:
         return
     ss.session_id = uuid.uuid4().hex[:12]
-    ss.client_id = None            # stable per-browser id, supplied by localStorage
-    ss.restored = False            # browser has answered the "load" request
-    ss.conv = None                 # Conversation
-    ss.gen = {"max_tokens": S.default_max_tokens, "temperature": S.default_temperature,
-              "top_p": S.default_top_p, "system_prompt": S.system_prompt, "thinking": DEFAULT_THINKING}
+    ss.client_id = None            # stable per-browser id, supplied by the browser store
+    ss.restored = False            # the browser has answered the "load" request
+    ss.store_error = None          # why this browser cannot keep chats (from the load answer)
+    ss.conv = None                 # the open Conversation
+    ss.index = []                  # the browser's chat list (history.meta_of entries), newest first
+    ss.deleted = []                # chats deleted in this session; the browser is told every run
+    ss.switch = None               # {"nonce", "id"}: waiting for the browser to save this chat and hand over the next
+    ss.legacy = False              # the open chat came from the pre-IndexedDB localStorage key
+    ss.editing = None              # (conv id, message index) of the reply being edited
+    ss.regen = None                # (conv id, message index) to regenerate on the next run
+    ss.notice = None               # one-off message for the visitor
+    ss.history_limit = HISTORY_PAGE
+    ss.nonce = 0
+    for name, value in DEFAULTS.items():
+        ss[SETTING_KEYS[name]] = value
     LOG.log_event("session_start", session_id=ss.session_id, **client_info())
+
+
+def gen() -> dict:
+    """The generation settings, as the sidebar widgets hold them."""
+    return {name: st.session_state[key] for name, key in SETTING_KEYS.items()}
+
+
+def nonce() -> str:
+    st.session_state.nonce += 1
+    return f"{st.session_state.session_id}-{st.session_state.nonce}"
 
 
 def client_info() -> dict:
@@ -87,81 +116,271 @@ def client_id() -> str:
 
 def current_conv() -> Conversation:
     if st.session_state.conv is None:
-        st.session_state.conv = Conversation.new(system_prompt=st.session_state.gen["system_prompt"])
+        st.session_state.conv = Conversation.new(system_prompt=gen()["system_prompt"])
     return st.session_state.conv
 
 
-def restore_from_browser() -> None:
-    """Ask the browser for its saved chat.  The component answers on its first
-    render, which triggers a rerun; until then we carry on with an empty chat."""
+def _event(name: str, **fields) -> None:
     ss = st.session_state
-    payload = local_store(action="load", store=STORE, key="ls_load", default=None)
-    if not (isinstance(payload, dict) and payload.get("loaded")):
-        return
-    ss.client_id = clean_id(payload.get("client_id"), fallback=ss.client_id)
-    saved = Conversation.from_untrusted(payload.get("conv"), max_messages=S.max_local_messages)
-    if saved is not None and (ss.conv is None or not ss.conv.messages):
-        ss.conv = saved              # don't clobber a chat the visitor already started this session
+    LOG.log_event(name, client_id=ss.client_id, session_id=ss.session_id, **fields)
+
+
+# ------------------------------------------------- the browser's copy (browser.py)
+def chat_list(conv: Conversation) -> list[dict]:
+    """The browser's chats, with the open one's current title and time."""
+    index = [e for e in st.session_state.index if e["id"] not in st.session_state.deleted]
+    return upsert(index, meta_of(conv)) if conv.messages else index
+
+
+def store_data(conv: Conversation) -> dict:
+    """What the browser should hold after this run (browser_store.js applies each part once)."""
+    ss = st.session_state
+    data = {"deletes": list(ss.deleted),
+            "note": f"Not saved in this browser: {ss.store_error}" if ss.store_error
+            else "Chats and settings are saved in this browser only."}
+    if conv.messages and conv.id not in ss.deleted:
+        data["conv"] = {"conv": conv.to_dict(), "meta": meta_of(conv), "legacy": ss.legacy}
+    if ss.restored:            # never overwrite saved settings with defaults before they were read
+        data["prefs"] = {"settings": gen(), "active": conv.id if conv.messages else None}
+    else:
+        data["load"] = f"{ss.session_id}-load"
+    if ss.switch:
+        data["open"] = ss.switch
+    data["ask"] = ss.switch["nonce"] if ss.switch else data.get("load")
+    return data
+
+
+def apply_loaded(p) -> bool:
+    """The browser's saved state, once per session: settings, the chat list and the chat open last time."""
+    ss = st.session_state
+    if ss.restored or not isinstance(p, dict) or p.get("nonce") != f"{ss.session_id}-load":
+        return False
     ss.restored = True
-    LOG.log_event("history_restored", client_id=ss.client_id, session_id=ss.session_id,
-                  messages=len(saved.messages) if saved else 0, stored_chars=payload.get("chars"))
+    ss.client_id = clean_id(p.get("client_id"), fallback=ss.client_id)
+    ss.store_error = None if p.get("ok") else str(p.get("error") or "unknown error")[:200]
+    ss.index = clean_index(p.get("index"))
+    settings = clean_settings(p.get("settings"), DEFAULTS, max_tokens_cap=S.max_tokens_cap,
+                              thinking_options=THINKING_OPTIONS)
+    for name, value in settings.items():
+        ss[SETTING_KEYS[name]] = value
+    saved = Conversation.from_untrusted(p.get("conv"), max_messages=S.max_local_messages)
+    legacy = Conversation.from_untrusted(p.get("legacy"), max_messages=S.max_local_messages)
+    if saved is None and legacy is not None and legacy.messages:
+        saved, ss.legacy = legacy, True            # the single chat an older version kept: moved on first save
+    if saved is not None and saved.messages and (ss.conv is None or not ss.conv.messages):
+        ss.conv = saved                            # don't clobber a chat the visitor already started
+    _event("history_restored", chats=len(ss.index), messages=len(saved.messages) if saved else 0,
+           store_ok=bool(p.get("ok")), migrated=ss.legacy)
+    return True
 
 
-def persist_to_browser(conv: Conversation, slot: str) -> None:
-    """Hand the current chat to the browser to store (empty chat -> entry removed)."""
-    local_store(action="save", store=STORE, conv=conv.to_dict(), key=f"ls_save_{slot}", default=None)
-
-
-def cb_clear_chat() -> None:
+def start_switch(target: str | None) -> None:
+    """Open chat ``target`` (None: a new chat).  The browser first saves the open chat, then answers."""
     ss = st.session_state
-    old = ss.conv
-    LOG.log_event("chat_cleared", client_id=ss.client_id, session_id=ss.session_id,
-                  conv_id=old.id if old else None, messages=len(old.messages) if old else 0)
-    ss.conv = Conversation.new(system_prompt=ss.gen["system_prompt"])
+    ss.editing = None
+    if ss.restored:
+        ss.switch = {"nonce": nonce(), "id": target}
+    elif target is None:       # no browser store (JavaScript never answered): nothing to save or fetch
+        finish_switch(None, None)
+
+
+def finish_switch(target: str | None, stored) -> None:
+    ss = st.session_state
+    old = current_conv()
+    if old.messages and old.id not in ss.deleted:
+        ss.index = upsert(ss.index, meta_of(old))
+    conv = Conversation.from_untrusted(stored, max_messages=S.max_local_messages) if target else None
+    if target and (conv is None or conv.id != target):
+        ss.index = [e for e in ss.index if e["id"] != target]
+        ss.notice = "That chat is no longer stored in this browser."
+        conv = None
+    ss.conv = conv or Conversation.new(system_prompt=gen()["system_prompt"])
+    ss.legacy = False
+    _event("chat_opened" if conv else "chat_new", conv_id=ss.conv.id, messages=len(ss.conv.messages))
+
+
+def apply_opened(p) -> bool:
+    ss = st.session_state
+    if not (ss.switch and isinstance(p, dict) and p.get("nonce") == ss.switch["nonce"]):
+        return False
+    target, ss.switch = ss.switch["id"], None
+    finish_switch(target, p.get("conv"))
+    return True
+
+
+def cb_loaded() -> None:
+    apply_loaded(browser.trigger("store", "loaded"))
+
+
+def cb_opened() -> None:
+    apply_opened(browser.trigger("store", "opened"))
+
+
+def cb_new_chat() -> None:
+    if current_conv().messages:
+        start_switch(None)
+
+
+def cb_open_chat(chat_id: str) -> None:
+    if chat_id != current_conv().id:
+        start_switch(chat_id)
+
+
+def cb_delete_chat() -> None:
+    ss = st.session_state
+    conv = current_conv()
+    ss.deleted.append(conv.id)
+    ss.index = [e for e in ss.index if e["id"] != conv.id]
+    _event("chat_deleted", conv_id=conv.id, messages=len(conv.messages))
+    if ss.restored:
+        start_switch(None)
+    else:
+        ss.conv = Conversation.new(system_prompt=gen()["system_prompt"])
+
+
+def cb_more_history() -> None:
+    st.session_state.history_limit += HISTORY_PAGE
+
+
+def cb_reset_settings() -> None:
+    for name, value in DEFAULTS.items():
+        st.session_state[SETTING_KEYS[name]] = value
+
+
+# ------------------------------------------------------- reply actions
+def _reply_at(conv_id: str, i: int) -> dict | None:
+    conv = current_conv()
+    ok = conv.id == conv_id and 0 < i < len(conv.messages) and conv.messages[i]["role"] == "assistant"
+    return conv.messages[i] if ok else None
+
+
+def cb_reply_action(key: str, conv_id: str, i: int) -> None:
+    action = browser.trigger(key, "action")
+    if _reply_at(conv_id, i) is None:
+        return
+    if action == "edit":
+        st.session_state.editing = (conv_id, i)
+    elif action == "regen":
+        st.session_state.editing = None
+        st.session_state.regen = (conv_id, i)
+
+
+def cb_edit_save(conv_id: str, i: int, key: str) -> None:
+    ss = st.session_state
+    text = ss.pop(key, None)
+    ss.editing = None
+    m = _reply_at(conv_id, i)
+    if m is None or not isinstance(text, str) or not text.strip() or text == m["content"]:
+        return
+    _event("reply_edited", conv_id=conv_id, index=i, chars_before=len(m["content"]), chars_after=len(text))
+    m["content"] = text[:MAX_CONTENT_CHARS]
+    m["edited"] = True
+    current_conv().touch()
+
+
+def cb_edit_cancel(key: str) -> None:
+    st.session_state.pop(key, None)
+    st.session_state.editing = None
+
+
+def take_regenerate(conv: Conversation) -> list[dict] | None:
+    """A requested regenerate: take that reply and everything after it out of the chat (returned, so a refused
+    request can put them back); the question before it is asked again."""
+    ss = st.session_state
+    req, ss.regen = ss.regen, None
+    if not req or _reply_at(*req) is None or conv.messages[req[1] - 1]["role"] != "user":
+        return None
+    i = req[1]
+    _event("reply_regenerated", conv_id=conv.id, index=i, removed=len(conv.messages) - i)
+    removed = conv.messages[i:]
+    del conv.messages[i:]
+    conv.touch()
+    return removed
 
 
 # ---------------------------------------------------------------- sidebar
-def render_sidebar(conv: Conversation) -> None:
+def _md_escape(text: str) -> str:
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|~<>$])", r"\\\1", text)
+
+
+def _browser_tz():
+    try:
+        return ZoneInfo(st.context.timezone or "UTC")
+    except Exception:  # noqa: BLE001 - unknown zone name or no browser context (AppTest)
+        return timezone.utc
+
+
+def render_history(conv: Conversation) -> None:
+    ss = st.session_state
+    entries = chat_list(conv)
+    if not entries:
+        st.container(key="history-empty").caption("Your chats will appear here.")
+    with st.container(key="history"):
+        shown = entries[:ss.history_limit]
+        for label, group in group_by_day(shown, datetime.now(timezone.utc), _browser_tz()):
+            st.caption(label)
+            for e in group:
+                here = e["id"] == conv.id
+                st.button(_md_escape(e["title"]), key=f"{'chat-here' if here else 'chat'}-{e['id']}", type="tertiary",
+                          on_click=cb_open_chat, args=(e["id"],), width="stretch",
+                          disabled=bool(ss.switch))
+        if len(entries) > len(shown):
+            st.button(f"Show {min(HISTORY_PAGE, len(entries) - len(shown))} more", type="tertiary",
+                      on_click=cb_more_history, key="chat-more")
+    answer = browser.store(store_data(conv), key="store", on_loaded=cb_loaded, on_opened=cb_opened)
+    if apply_loaded(answer.loaded) or apply_opened(answer.opened):
+        st.rerun()             # an answer whose callback Streamlit skipped: redraw with it
+
+
+def render_settings() -> None:
+    with st.expander("Generation settings"):
+        st.segmented_control(
+            "Thinking", THINKING_OPTIONS, format_func=THINKING_LABELS.get, key=SETTING_KEYS["thinking"],
+            required=True, width="stretch",
+            help="High: the model reasons step by step before answering (shown under 'Thought'). "
+                 "Max: deepest reasoning, much slower. Reasoning tokens count toward Max reply tokens, "
+                 "so raise that slider when thinking is on.")
+        st.slider("Max reply tokens", MAX_TOKENS_MIN, S.max_tokens_cap, step=MAX_TOKENS_STEP,
+                  key=SETTING_KEYS["max_tokens"])
+        st.slider("Temperature", TEMPERATURE[0], TEMPERATURE[1], step=TEMPERATURE[2], key=SETTING_KEYS["temperature"])
+        st.slider("Top-p", TOP_P[0], TOP_P[1], step=TOP_P[2], key=SETTING_KEYS["top_p"])
+        st.text_area("System prompt", key=SETTING_KEYS["system_prompt"], height=100, max_chars=SYSTEM_PROMPT_CHARS,
+                     help="Used for chats started after the change.")
+        st.button("Reset to defaults", type="tertiary", on_click=cb_reset_settings, key="settings-reset")
+        st.caption("Settings are remembered in this browser.")
+
+
+def render_server() -> None:
+    with st.expander("Server"):
+        stats = Q.stats()
+        up = LLM.health()
+        st.markdown(f"{':green[●] Online' if up else ':red[●] Unreachable'}  \n`{LLM.model or S.model or '?'}`")
+        if up and LLM.max_model_len:
+            st.caption(f"Context window {LLM.max_model_len:,} tokens")
+        line = (f"Running {stats['running']}/{stats['max_concurrency']} · waiting {stats['waiting']} · "
+                f"served {stats['served']}")
+        if stats["served"]:
+            line += f" · average wait {stats['avg_wait_s']:.1f} s · refused {stats['rejected']}"
+        st.caption(line)
+        st.caption("Requests are served first come, first served; one request at a time per visitor.")
+
+
+def render_sidebar(conv: Conversation):
+    """Everything in the sidebar; returns the monitor's slot (redrawn while a reply streams)."""
     with st.sidebar:
-        st.button("🗑 Clear chat", on_click=cb_clear_chat, use_container_width=True,
-                  disabled=not conv.messages, key="clear_chat")
-        st.caption("Your chat history is stored **only in this browser** (localStorage) and comes back "
-                   "when you return on the same device. Clearing removes it from this browser.")
-
-        with st.expander("Generation settings"):
-            g = st.session_state.gen
-            g["system_prompt"] = st.text_area("System prompt", value=g["system_prompt"], height=90,
-                                              help="Applies from the next new chat (after Clear).")
-            g["thinking"] = st.radio(
-                "Thinking", THINKING_OPTIONS, index=THINKING_OPTIONS.index(g.get("thinking", "off")),
-                format_func=THINKING_LABELS.get, horizontal=True,
-                help="High: the model reasons step by step before answering (shown under 'Reasoning'). "
-                     "Max: deepest reasoning, much slower. Reasoning tokens count toward Max reply tokens, "
-                     "so raise that slider when thinking is on.")
-            g["max_tokens"] = st.slider("Max reply tokens", 64, S.max_tokens_cap, int(g["max_tokens"]), 64)
-            g["temperature"] = st.slider("Temperature", 0.0, 1.5, float(g["temperature"]), 0.05)
-            g["top_p"] = st.slider("Top-p", 0.1, 1.0, float(g["top_p"]), 0.05)
-
-        with st.expander("Server & queue", expanded=True):
-            st_ = Q.stats()
-            up = LLM.health()
-            st.markdown(("🟢 model server up" if up else "🔴 model server unreachable") +
-                        f"  \n`{LLM.model or S.model or '?'}`" +
-                        (f" · ctx {LLM.max_model_len:,}" if up and LLM.max_model_len else ""))
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Running", f"{st_['running']}/{st_['max_concurrency']}")
-            c2.metric("Waiting", st_["waiting"])
-            c3.metric("Served", st_["served"])
-            if st_["served"]:
-                st.caption(f"avg queue wait {st_['avg_wait_s']:.1f}s · rejected {st_['rejected']}")
-            st.caption("Requests are served strictly first-come-first-served; one in-flight request per visitor.")
+        st.button("New chat", type="primary", icon=":material/add:", width="stretch", on_click=cb_new_chat,
+                  key="new-chat")
+        render_history(conv)
+        render_settings()
+        render_server()
+        return monitor_panel() if MON is not None else None
 
 
 # ------------------------------------------------------------ performance
-# Categorical slots in fixed order (dataviz reference palette): head, worker, ...
+# Categorical slots in fixed order: head, worker, ... (black, then the accent red; the theme's chart colours)
 SERIES_COLORS = {
-    "light": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"],
-    "dark": ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"],
+    "light": ["#161616", "#D52B1E", "#8C8A84", "#3F6E9A", "#B58A00", "#2F7D4F"],
+    "dark": ["#EDEDEA", "#F0574B", "#A3A19A", "#6F9CC7", "#D6A920", "#4FA673"],
 }
 GIB = 1024 ** 3
 
@@ -190,13 +409,13 @@ def _trend_chart(rows: list[dict], field: str, title: str, labels: list[str]):
         color=alt.Color("host:N", scale=alt.Scale(domain=labels, range=colors),
                         legend=alt.Legend(orient="bottom", title=None)),
     )
-    line = base.mark_line(strokeWidth=2)
-    dots = base.mark_point(size=64, filled=True).encode(
+    line = base.mark_line(strokeWidth=1.5)
+    dots = base.mark_point(size=48, filled=True).encode(
         opacity=alt.condition(hover, alt.value(1), alt.value(0)),
         tooltip=[alt.Tooltip("host:N", title="node"), alt.Tooltip("t:T", title="time", format="%H:%M:%S"),
                  alt.Tooltip(f"{field}:Q", title=title, format=".0f")],
     ).add_params(hover)
-    return (line + dots).properties(title=title, height=120)
+    return (line + dots).properties(title=title, height=110)
 
 
 def draw_monitor(slot) -> None:
@@ -211,7 +430,7 @@ def draw_monitor(slot) -> None:
             st.markdown(f"**{label}** · `{name}`" + (f" · {s['host']}" if s["hostname"] else ""))
             L = s["latest"]
             if L is None or MON.is_stale(s):
-                st.caption("🔴 no data" + (f" — {s['error']}" if s["error"] else (" yet…" if L is None else "")))
+                st.caption(":red[●] no data" + (f" — {s['error']}" if s["error"] else (" yet…" if L is None else "")))
                 continue
             pct = L["mem_used_pct"] or 0.0
             st.progress(min(pct / 100, 1.0),
@@ -222,9 +441,9 @@ def draw_monitor(slot) -> None:
             st.caption(" · ".join(mem_bits))
             if L["mem_avail"] < wd:
                 st.error(f"Available memory is below the OOM-watchdog line ({S.monitor_watchdog_mib / 1024:.0f} GiB) "
-                         f"— the watchdog kills vLLM.", icon="⛔")
+                         f"— the watchdog kills the model server.")
             elif L["mem_avail"] < 2 * wd:
-                st.warning("Low memory headroom.", icon="⚠️")
+                st.warning("Low memory headroom.")
             util = L.get("gpu_util")
             st.progress(min((util or 0) / 100, 1.0), text=f"GPU {util:.0f}%" if util is not None else "GPU n/a")
             gpu_bits = [f"{L['gpu_temp']:.0f} °C" if L.get("gpu_temp") is not None else None,
@@ -245,15 +464,70 @@ def draw_monitor(slot) -> None:
 @st.fragment(run_every=S.monitor_interval_s)
 def monitor_panel():
     """Refreshes itself every interval without rerunning the page.  Timed fragment reruns
-    never preempt a running script, so while a reply streams, handle_prompt redraws the
+    never preempt a running script, so while a reply streams, generate_reply redraws the
     returned slot instead."""
-    with st.expander("Performance", expanded=True):
+    with st.expander("Performance"):
         slot = st.empty()
     draw_monitor(slot)
     return slot
 
 
 # -------------------------------------------------------------- chat view
+def context_limits(g: dict) -> tuple[int, int]:
+    """(model context, estimated history budget): history beyond the budget is left out of a request."""
+    max_len = LLM.max_model_len or (S.context_token_budget + int(g["max_tokens"]) + 2048)
+    return max_len, min(S.context_token_budget, max_len - int(g["max_tokens"]) - 2048)
+
+
+def context_usage(conv: Conversation) -> dict | None:
+    """What the next question would be sent with (system prompt + the history that fits), counted by the
+    server's chat template; earlier replies' thinking is not resent. Recounted only when the conversation or
+    the settings that shape the request change."""
+    if not conv.messages:
+        return None
+    g = gen()
+    limit, budget = context_limits(g)
+    api, dropped, est = build_context(conv.messages, conv.system_prompt, budget)
+    key = (conv.id, conv.updated, len(conv.messages), conv.system_prompt, g["thinking"], len(api), dropped)
+    cached = st.session_state.get("ctx_usage")
+    if cached is None or cached["key"] != key:
+        thinking = None if g["thinking"] == "off" else g["thinking"]
+        # an empty question renders the history exactly as the next request will (thinking dropped)
+        n = LLM.count_chat_tokens(api + [{"role": "user", "content": ""}], thinking=thinking)
+        cached = {"key": key, "tokens": n if n is not None else est, "exact": n is not None, "dropped": dropped}
+        st.session_state.ctx_usage = cached
+    return dict(cached, limit=limit, reply_tokens=int(g["max_tokens"]))
+
+
+def draw_context_gauge(conv: Conversation) -> None:
+    u = context_usage(conv)
+    if u is None:
+        return
+    fraction, label, notes = context_gauge(u["tokens"], u["exact"], u["limit"], u["dropped"], u["reply_tokens"])
+    with st.container(key="gauge"):
+        st.progress(fraction, text=label)
+        st.caption(" · ".join(f"⚠ {n}" for n in notes) or "What the model reads with your next message",
+                   help="System prompt plus the conversation so far, counted by the model's tokenizer; your next "
+                        "question and the reply add to it. Thinking from earlier replies is not sent again, so it "
+                        "does not count. When the conversation no longer fits, the oldest messages are left out; "
+                        "start a new chat to keep everything in view. The numbers under each reply are that "
+                        "reply's own input and output.")
+
+
+def render_header(conv: Conversation) -> None:
+    with st.container(horizontal=True, vertical_alignment="bottom", key="masthead"):
+        st.title(S.app_title, anchor=False)
+        if conv.messages:
+            with st.popover("Delete", type="tertiary", icon=":material/delete:", key="delete-chat"):
+                st.markdown("Delete this chat from this browser?")
+                st.button("Delete chat", type="primary", on_click=cb_delete_chat, key="delete-chat-confirm")
+                st.caption("The server's anonymous request log is not affected.")
+    if st.session_state.notice:
+        st.info(st.session_state.notice)
+        st.session_state.notice = None
+    draw_context_gauge(conv)
+
+
 def _meta_caption(meta: dict) -> str:
     bits = token_caption(meta)
     if meta.get("tok_s"):
@@ -267,43 +541,94 @@ def _meta_caption(meta: dict) -> str:
     return " · ".join(bits)
 
 
-def render_message(m: dict) -> None:
+def _thought_label(m: dict) -> str:
+    n = (m.get("meta") or {}).get("reasoning_tokens")
+    return f"Thought · {n:,} tokens" if isinstance(n, int) and not isinstance(n, bool) else "Thought"
+
+
+def _reply_note(m: dict) -> str:
+    status = m.get("status")
+    if status == "interrupted":
+        note = "Stopped before the reply finished"
+    elif status == "error":
+        note = f"Failed: {m.get('error', 'error')}"
+    else:
+        note = _meta_caption(m.get("meta") or {})
+    return " · ".join(b for b in (note, "edited" if m.get("edited") else "") if b)
+
+
+def render_editor(conv: Conversation, i: int, m: dict) -> None:
+    key = f"edit-{conv.id[:12]}-{i}"
+    lines = m["content"].count("\n") + len(m["content"]) // 70 + 2
+    with st.form(key=f"form-{key}", border=False):
+        st.text_area("Edit the reply", value=m["content"], key=key, height=min(560, max(140, 24 * lines)),
+                     label_visibility="collapsed")
+        with st.container(horizontal=True):
+            st.form_submit_button("Save", type="primary", on_click=cb_edit_save, args=(conv.id, i, key))
+            st.form_submit_button("Cancel", type="tertiary", on_click=cb_edit_cancel, args=(key,))
+        st.caption("The next questions see the edited reply.")
+
+
+def render_message(conv: Conversation, i: int) -> None:
+    m = conv.messages[i]
     with st.chat_message(m["role"]):
+        if m["role"] == "assistant" and st.session_state.editing == (conv.id, i):
+            render_editor(conv, i, m)
+            return
         if m.get("reasoning"):
-            with st.expander("Reasoning", expanded=False):
+            with st.expander(_thought_label(m), type="compact"):
                 st.markdown(m["reasoning"])
         if m.get("content"):
             st.markdown(m["content"])
-        status = m.get("status")
-        if status == "interrupted":
-            st.caption("⏹ stopped before the reply finished")
-        elif status == "error":
-            st.caption(f"❌ {m.get('error', 'error')}")
-        elif m.get("meta"):
-            st.caption(_meta_caption(m["meta"]))
+        if m["role"] == "assistant":
+            with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+                key = f"act-{conv.id[:12]}-{i}"
+                browser.reply_actions(m.get("content", ""), len(conv.messages) - 1 - i, key=key,
+                                      on_action=lambda: cb_reply_action(key, conv.id, i))
+                note = _reply_note(m)
+                if note:
+                    st.caption(note)
 
 
-def handle_prompt(conv: Conversation, prompt: str, mon_slot=None) -> None:
-    ss = st.session_state
-    g = ss.gen
-    cid = client_id()
+def render_chat(conv: Conversation) -> None:
+    render_header(conv)
+    if not conv.messages:
+        with st.container(key="welcome"):
+            st.markdown("## How can I help?")
+            st.caption("Chats and settings stay in this browser. The server keeps an anonymous log of requests "
+                       "for operations.")
+    for i in range(len(conv.messages)):
+        render_message(conv, i)
 
-    # 1. keep the visitor's turn: in memory now, in their browser right away
+
+def handle_prompt(conv: Conversation, prompt: str, mon_slot=None) -> bool:
+    """Append the visitor's question and answer it; True when the page should be redrawn from state."""
     conv.messages.append({"role": "user", "content": prompt, "ts": now_iso()})
     conv.trim(S.max_local_messages)
-    render_message(conv.messages[-1])
-    persist_to_browser(conv, "pre")
+    conv.touch()
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    return generate_reply(conv, mon_slot)
 
-    # 2. build the context window
+
+def generate_reply(conv: Conversation, mon_slot=None, *, replaced: list[dict] | None = None) -> bool:
+    """Answer the last (user) message: queue, then stream.  ``replaced``: the messages a regenerate took out.
+    True when the page should be redrawn from state (a reply was added, or the request was refused)."""
+    ss = st.session_state
+    g = gen()
+    cid = client_id()
+    prompt = conv.messages[-1]["content"]
+
+    # 1. build the context window
     _, budget = context_limits(g)
     api_messages, dropped, est = build_context(conv.messages, conv.system_prompt, budget)
     if len(api_messages) == 0 or api_messages[-1]["role"] != "user":
         with st.chat_message("assistant"):
             st.error(f"This message is too long for the context window (~{est:,} tokens estimated, "
                      f"budget {budget:,}). Please shorten it.")
-        return
+        return False
 
-    # 3. queue, then stream
+    # 2. queue, then stream
     record = {
         "client_id": cid, "session_id": ss.session_id, **client_info(),
         "conv_id": conv.id, "turn_id": uuid.uuid4().hex[:12], "model": LLM.model or S.model,
@@ -311,21 +636,29 @@ def handle_prompt(conv: Conversation, prompt: str, mon_slot=None) -> None:
                    "top_p": float(g["top_p"]), "thinking": g["thinking"]},
         "context": {"messages_sent": len(api_messages), "dropped_turns": dropped, "est_prompt_tokens": est},
         "prompt": prompt,
+        "regenerated": replaced is not None,
     }
     with st.chat_message("assistant"):
-        status = st.status("Joining the queue…", expanded=False)
-        reasoning_slot = st.empty()
+        status = st.status("Joining the queue…", type="compact")
         body = st.empty()
-        foot = st.empty()
 
         try:
             ticket = Q.submit(cid)
         except (UserBusy, QueueFull) as e:
-            status.update(label=f"{e} Your message was not sent.", state="error")
             LOG.log_event("rejected", client_id=cid, session_id=ss.session_id, conv_id=conv.id,
                           reason=type(e).__name__, queue=Q.stats())
-            conv.messages.pop()          # don't keep an unanswered turn the visitor must resend
-            return
+            if replaced is not None:
+                conv.messages.extend(replaced)               # keep the reply that was to be replaced
+                ss.notice = f"{e} The reply was not regenerated."
+            else:
+                conv.messages.pop()                          # back into the input box, not left unanswered
+                ss.restore_prompt = prompt
+                ss.notice = f"{e} Your message was not sent."
+            conv.touch()
+            return True
+        # keep the question in the browser while the reply runs (the sidebar copy predates it)
+        browser.store({"conv": {"conv": conv.to_dict(), "meta": meta_of(conv), "legacy": ss.legacy}},
+                      key="store-pending")
 
         text, reasoning = "", ""
         usage, finish = None, None
@@ -354,7 +687,7 @@ def handle_prompt(conv: Conversation, prompt: str, mon_slot=None) -> None:
 
         try:
             Q.wait(ticket, timeout=S.max_wait_s, on_tick=on_tick)
-            status.update(label="Generating…", state="running")
+            status.update(label=":shimmer[Waiting for the model]")
             t_start = time.monotonic()
             thinking = None if g["thinking"] == "off" else g["thinking"]
             for ev in LLM.stream_chat(api_messages, max_tokens=int(g["max_tokens"]),
@@ -367,7 +700,10 @@ def handle_prompt(conv: Conversation, prompt: str, mon_slot=None) -> None:
                     if t_first is None:
                         t_first = time.monotonic()
                     if not text and reasoning:
-                        status.update(label="Generating…", state="running")
+                        status.update(label=f"Thought for {time.monotonic() - t_start:.0f}s", state="complete",
+                                      expanded=False)
+                    elif not text:
+                        status.update(label=":shimmer[Writing]")
                     text += ev["text"]
                     body.markdown(text + " ▌")
                 elif kind == "reasoning":
@@ -375,8 +711,8 @@ def handle_prompt(conv: Conversation, prompt: str, mon_slot=None) -> None:
                         t_first = time.monotonic()
                     reasoning += ev["text"]
                     if reasoning_box is None:
-                        status.update(label="Thinking…", state="running")
-                        reasoning_box = reasoning_slot.expander("Reasoning", expanded=True).empty()
+                        status.update(label=":shimmer[Thinking]", expanded=True)
+                        reasoning_box = status.empty()
                     reasoning_box.markdown(reasoning)
                 elif kind == "usage":
                     usage = ev["usage"]
@@ -393,14 +729,12 @@ def handle_prompt(conv: Conversation, prompt: str, mon_slot=None) -> None:
             finalized["meta"] = _finish_turn(conv, record, ticket, text, reasoning, usage, finish,
                                              t_submit, t_start, t_first, done=done, err=err)
 
-        meta = finalized["meta"]
         if err:
             status.update(label="Failed — your message was not answered", state="error")
             body.error(err)
         else:
-            status.update(label=f"Done · {_meta_caption(meta)}", state="complete")
             body.markdown(text)
-            foot.caption(_meta_caption(meta))
+        return True
 
 
 def _finish_turn(conv, record, ticket, text, reasoning, usage, finish, t_submit, t_start, t_first,
@@ -431,89 +765,40 @@ def _finish_turn(conv, record, ticket, text, reasoning, usage, finish, t_submit,
         msg["error"] = err
     conv.messages.append(msg)
     conv.trim(S.max_local_messages)
+    conv.touch()
     LOG.log_turn({**record, "ticket_id": ticket.id, "status": status, "error": err,
                   "response": text, "reasoning": reasoning or None, "usage": usage, "timing": meta})
     return meta
 
 
-def context_limits(g: dict) -> tuple[int, int]:
-    """(model context, estimated history budget): history beyond the budget is left out of a request."""
-    max_len = LLM.max_model_len or (S.context_token_budget + int(g["max_tokens"]) + 2048)
-    return max_len, min(S.context_token_budget, max_len - int(g["max_tokens"]) - 2048)
-
-
-def context_usage(conv: Conversation) -> dict | None:
-    """What the next question would be sent with (system prompt + the history that fits), counted by the
-    server's chat template; earlier replies' thinking is not resent. Recounted only when the conversation or
-    the settings that shape the request change."""
-    if not conv.messages:
-        return None
-    g = st.session_state.gen
-    limit, budget = context_limits(g)
-    api, dropped, est = build_context(conv.messages, conv.system_prompt, budget)
-    last = conv.messages[-1]
-    key = (conv.id, len(conv.messages), last.get("ts"), len(last.get("content") or ""), conv.system_prompt,
-           g["thinking"], len(api), dropped)
-    cached = st.session_state.get("ctx_usage")
-    if cached is None or cached["key"] != key:
-        thinking = None if g["thinking"] == "off" else g["thinking"]
-        # an empty question renders the history exactly as the next request will (thinking dropped)
-        n = LLM.count_chat_tokens(api + [{"role": "user", "content": ""}], thinking=thinking)
-        cached = {"key": key, "tokens": n if n is not None else est, "exact": n is not None, "dropped": dropped}
-        st.session_state.ctx_usage = cached
-    return dict(cached, limit=limit, reply_tokens=int(g["max_tokens"]))
-
-
-def draw_context_gauge(slot, conv: Conversation) -> None:
-    u = context_usage(conv)
-    with slot.container():
-        if u is None:
-            return
-        fraction, label, notes = context_gauge(u["tokens"], u["exact"], u["limit"], u["dropped"], u["reply_tokens"])
-        st.progress(fraction, text=label)
-        st.caption(" · ".join(f"⚠ {n}" for n in notes) or "What the model reads with your next message",
-                   help="System prompt plus the conversation so far, counted by the model's tokenizer; your next "
-                        "question and the reply add to it. Thinking from earlier replies is not sent again, so it "
-                        "does not count. When the conversation no longer fits, the oldest messages are left out; "
-                        "start a new chat to keep everything in view. The numbers under each reply are that "
-                        "reply's own input and output.")
-
-
-def render_chat(conv: Conversation, mon_slot=None):
-    """Draw the chat; returns the context gauge's slot so main() can redraw it after a reply."""
-    st.title(S.app_title)
-    gauge = st.empty()
-    draw_context_gauge(gauge, conv)
-    if not conv.messages:
-        st.caption("Ask anything. Your conversation stays in this browser; the server keeps an anonymous "
-                   "log of requests for operations.")
-    for m in conv.messages:
-        render_message(m)
-    prompt = st.chat_input("Message the model…", key="chat_box")
-    if prompt and prompt.strip():
-        handle_prompt(conv, prompt.strip(), mon_slot)
-    return gauge
+def render_footer() -> None:
+    st.html(f'<div class="app-version">{html.escape(S.version)}</div>')
 
 
 # ------------------------------------------------------------------- main
 def main() -> None:
     ss_init()
-    if not st.session_state.restored:
-        restore_from_browser()
+    st.markdown(f"<style>{PAGE_CSS}</style>", unsafe_allow_html=True)
     conv = current_conv()
-    # The monitor goes first so it is live (not a stale copy) while a reply streams.
-    mon_slot = None
-    if MON is not None:
-        with st.sidebar:
-            mon_slot = monitor_panel()
-    gauge = render_chat(conv, mon_slot)
-    render_sidebar(conv)
-    draw_context_gauge(gauge, current_conv())      # after a reply and with this run's settings
-    # Save AFTER the browser has answered the load (or once the visitor has typed
-    # something) -- never before, or an empty chat would overwrite the stored one.
-    if st.session_state.restored or conv.messages:
-        persist_to_browser(conv, "post")
+    replaced = take_regenerate(conv)
+    if "restore_prompt" in st.session_state:         # a refused question goes back into the input box
+        st.session_state.chat_box = st.session_state.pop("restore_prompt")
+    with st.bottom:
+        prompt = st.chat_input("Message the model…", key="chat_box", submit_mode="stop")
+        st.caption(S.disclaimer, text_alignment="center")
+    # The sidebar goes first: its monitor stays live while a reply streams, and its settings apply to it.
+    mon_slot = render_sidebar(conv)
+    render_chat(conv)
+    render_footer()
+    answered = False
+    if prompt and prompt.strip():
+        answered = handle_prompt(conv, prompt.strip(), mon_slot)
+    elif replaced is not None:
+        answered = generate_reply(conv, mon_slot, replaced=replaced)
+    if answered:
+        st.rerun()             # redraw from state: actions under the new reply, chat list, gauge, browser copy
 
 
 if __name__ == "__main__":
     main()
+

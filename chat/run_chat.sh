@@ -31,6 +31,15 @@ if [ "$RUNTIME" = v41 ]; then
   export CHAT_READ_TIMEOUT="${CHAT_READ_TIMEOUT:-1800}"
 fi
 export CHAT_LOG_DIR="${CHAT_LOG_DIR:-$LOG_DIR/chat}"
+# Shown in the page's bottom-left corner: repository VERSION and commit ("-dirty": chat/ differs from it).
+if [ -z "${CHAT_VERSION:-}" ]; then
+  CHAT_VERSION="v$(cat "$ROOT/VERSION" 2>/dev/null || echo '?')"
+  if commit=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null); then
+    git -C "$ROOT" diff --quiet HEAD -- chat 2>/dev/null || commit="$commit-dirty"
+    CHAT_VERSION="$CHAT_VERSION · $commit"
+  fi
+  export CHAT_VERSION
+fi
 # Performance panel: every node in cluster.conf (head first), same ssh key + watchdog line.
 export CHAT_MONITOR_HOSTS="${CHAT_MONITOR_HOSTS:-${NODES:-}}"
 export CHAT_MONITOR_SSH_KEY="${CHAT_MONITOR_SSH_KEY:-${SSH_KEY:-}}"

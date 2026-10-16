@@ -2,9 +2,9 @@
 
 Where things live
 -----------------
-* The **conversation** belongs to the visitor's browser: the app hands it to the
-  ``local_store`` component, which keeps it in ``localStorage``.  On the next
-  visit the component hands it back.  Because that data comes from the client
+* **Conversations** belong to the visitor's browser: the app hands them to the
+  ``browser_store`` component, which keeps them in IndexedDB (one record per chat);
+  on the next visit it hands them back.  Because that data comes from the client
   it is treated as untrusted and re-validated by :meth:`Conversation.from_untrusted`.
 * The **server** keeps only append-only JSONL logs under ``log_dir``: one line
   per turn (every visitor) and one line per notable event.
@@ -33,11 +33,13 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def is_id(value) -> bool:
+    return isinstance(value, str) and bool(_ID_RE.match(value))
+
+
 def clean_id(value, fallback: Optional[str] = None) -> str:
     """Accept a hex id from the client, or mint a fresh one."""
-    if isinstance(value, str) and _ID_RE.match(value):
-        return value
-    return fallback or uuid.uuid4().hex
+    return value if is_id(value) else (fallback or uuid.uuid4().hex)
 
 
 @dataclass
@@ -45,11 +47,18 @@ class Conversation:
     id: str
     created: str = field(default_factory=now_iso)
     system_prompt: str = ""
-    messages: list = field(default_factory=list)   # [{role, content, ts, reasoning?, meta?, status?, error?}]
+    messages: list = field(default_factory=list)   # [{role, content, ts, reasoning?, meta?, status?, error?, edited?}]
+    updated: str = ""                              # last change: orders the chat list, versions the browser copy
 
     @staticmethod
     def new(system_prompt: str = "") -> "Conversation":
-        return Conversation(id=uuid.uuid4().hex, system_prompt=system_prompt)
+        c = Conversation(id=uuid.uuid4().hex, system_prompt=system_prompt)
+        c.updated = c.created
+        return c
+
+    def touch(self) -> None:
+        """Mark a change (new turn, edit, regenerate) so the browser copy is rewritten."""
+        self.updated = now_iso()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -80,23 +89,28 @@ class Conversation:
                 rec["status"] = m["status"]
             if isinstance(m.get("error"), str) and m["error"]:
                 rec["error"] = m["error"][:300]
+            if m.get("edited") is True:
+                rec["edited"] = True
             if isinstance(m.get("meta"), dict):
                 rec["meta"] = {k: v for k, v in m["meta"].items()
                                if k in META_KEYS and isinstance(v, (int, float, str, type(None)))}
             out.append(rec)
         sp = obj.get("system_prompt")
         created = obj.get("created")
+        created = created[:40] if isinstance(created, str) else now_iso()
+        updated = obj.get("updated")
         return Conversation(
             id=clean_id(obj.get("id")),
-            created=created[:40] if isinstance(created, str) else now_iso(),
+            created=created,
             system_prompt=sp[:4000] if isinstance(sp, str) else "",
             messages=out,
+            updated=updated[:40] if isinstance(updated, str) and updated else created,
         )
 
 
 class ChatLogger:
     """Append-only JSONL: ``chat-YYYY-MM-DD.jsonl`` (one line per turn, all visitors)
-    and ``events-YYYY-MM-DD.jsonl`` (sessions, clears, queue rejections)."""
+    and ``events-YYYY-MM-DD.jsonl`` (sessions, new/opened/deleted chats, edits, queue rejections)."""
 
     def __init__(self, log_dir: Path) -> None:
         self.log_dir = Path(log_dir)

@@ -5,9 +5,52 @@ headless = true
 enableXsrfProtection = true
 fileWatcherType = "none"      # production: no inotify polling of the source tree
 maxUploadSize = 5
+enableStaticServing = true    # chat/static: the self-hosted Inter font (no third-party font requests)
 
 [browser]
 gatherUsageStats = false
 
+[client]
+toolbarMode = "minimal"       # the page menu only (no developer "Deploy" button)
+
+# Swiss style: one sans-serif, black on warm white, a single red accent, hairlines, square corners.
+# components/page.css repeats these colours for the parts the theme does not reach.
 [theme]
 base = "light"
+primaryColor = "#D52B1E"
+backgroundColor = "#FAFAF8"
+secondaryBackgroundColor = "#EFEEEA"
+textColor = "#161616"
+borderColor = "#DEDCD5"
+linkColor = "#B3241A"
+linkUnderline = true
+grayColor = "#6E6C66"
+redColor = "#D52B1E"
+codeBackgroundColor = "#F0EFEB"
+font = "Inter, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+headingFont = "Inter, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif"
+headingFontWeights = [700, 650, 600, 600, 600, 600]
+headingFontSizes = ["2rem", "1.5rem", "1.25rem", "1.0625rem", "0.9375rem", "0.8125rem"]
+baseFontSize = 16
+baseRadius = "2px"
+buttonRadius = "2px"
+showWidgetBorder = true
+showSidebarBorder = true
+chartCategoricalColors = ["#161616", "#D52B1E", "#8C8A84", "#3F6E9A"]
+
+[[theme.fontFaces]]
+family = "Inter"
+url = "app/static/fonts/InterVariable.woff2"
+weight = "100 900"
+style = "normal"
+
+[[theme.fontFaces]]
+family = "Inter"
+url = "app/static/fonts/InterVariable-Italic.woff2"
+weight = "100 900"
+style = "italic"
+
+[theme.sidebar]
+backgroundColor = "#F2F1ED"
+secondaryBackgroundColor = "#E7E5DF"
+borderColor = "#DEDCD5"

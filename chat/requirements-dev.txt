@@ -1,2 +1,2 @@
 pyflakes>=3.2
-selenium>=4.20   # tests/browser_check.py (needs Firefox + geckodriver)
+playwright>=1.50   # tests/browser_check.py (then: python -m playwright install chromium)
