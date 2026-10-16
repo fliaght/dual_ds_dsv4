@@ -57,6 +57,10 @@ def check_links(path, errors):
 
 
 def main():
+    if not (ROOT / "AGENTS.md").exists() and not (ROOT / "Docs").exists():
+        # The published branch carries code only; the documentation is kept in the maintainer's checkout.
+        print("Documentation is not in this checkout: documentation check skipped.")
+        return
     errors = []
     version = (ROOT / "VERSION").read_text().strip()
     if not re.fullmatch(SEMVER, version):
